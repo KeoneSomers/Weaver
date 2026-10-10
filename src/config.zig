@@ -1,5 +1,26 @@
 const std = @import("std");
-pub const Theme = enum { dark, ultra_dark, graphite, midnight, ocean, forest, plum, nord, light, sand, paper };
+pub const Theme = enum {
+    dark,
+    carbon,
+    graphite,
+    midnight,
+    ocean,
+    forest,
+    plum,
+    nord,
+    light,
+    sand,
+    paper,
+    /// Settings written before Ultra Dark became Dark still name it.
+    pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Theme {
+        const name = switch (try source.nextAllocMax(a, .alloc_if_needed, options.max_value_len.?)) {
+            inline .string, .allocated_string => |slice| slice,
+            else => return error.UnexpectedToken,
+        };
+        if (std.mem.eql(u8, name, "ultra_dark")) return .dark;
+        return std.meta.stringToEnum(Theme, name) orelse error.InvalidEnumTag;
+    }
+};
 pub const TextSize = enum { small, medium, large, extra_large };
 pub const DiffFont = enum { mono, sans };
 pub const SettingValue = struct { id: []const u8, value: []const u8 };
@@ -194,6 +215,23 @@ test "workspace persistence deduplicates paths and restores selection and appear
     try std.testing.expectEqual(@as(?i64, 1234567890), restored.data.repositories[0].last_fetched);
     try std.testing.expectEqualStrings("git", restored.data.repositories[0].provider);
     try std.testing.expect(equalPath(repository, restored.data.repositories[0].path));
+}
+
+test "settings saved with the former Ultra Dark theme load as Dark" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("WEAVER_CONFIG_HOME", root);
+    try temp.dir.createDirPath(io, "Weaver");
+    try temp.dir.writeFile(io, .{ .sub_path = "Weaver/settings.json", .data = "{\"theme\":\"ultra_dark\"}" });
+    var config = try Config.init(io, a, &env);
+    defer config.deinit();
+    try std.testing.expectEqual(Theme.dark, config.data.theme);
 }
 
 test "removing a workspace entry preserves the selected repository when possible" {

@@ -23,7 +23,7 @@ pub fn accentName(hex: []const u8) []const u8 {
 pub fn themeName(selected: config.Theme) []const u8 {
     return switch (selected) {
         .dark => "Dark",
-        .ultra_dark => "Ultra Dark",
+        .carbon => "Carbon",
         .light => "Light",
         .graphite => "Graphite",
         .midnight => "Midnight",
@@ -38,8 +38,8 @@ pub fn themeName(selected: config.Theme) []const u8 {
 pub fn theme(selected: config.Theme, accent: []const u8, text_size: config.TextSize) ui.Theme {
     @setEvalBranchQuota(200_000);
     var value = switch (selected) {
-        .dark => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#0C0D0F" }, .elevated = .{ .hex = "#191A1D" }, .muted = .{ .hex = "#27282D" }, .toned = .{ .hex = "#373940" }, .dimmed = .{ .hex = "#9699A3" } }),
-        .ultra_dark => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#000000" }, .elevated = .{ .hex = "#0A0A0C" }, .muted = .{ .hex = "#17181B" }, .toned = .{ .hex = "#26272C" }, .dimmed = .{ .hex = "#8A8D97" }, .text = .{ .hex = "#E6E7EA" } }),
+        .dark => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#000000" }, .elevated = .{ .hex = "#0A0A0C" }, .muted = .{ .hex = "#17181B" }, .toned = .{ .hex = "#26272C" }, .dimmed = .{ .hex = "#8A8D97" }, .text = .{ .hex = "#E6E7EA" } }),
+        .carbon => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#0C0D0F" }, .elevated = .{ .hex = "#191A1D" }, .muted = .{ .hex = "#27282D" }, .toned = .{ .hex = "#373940" }, .dimmed = .{ .hex = "#9699A3" } }),
         .graphite => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#1B1B1D" }, .elevated = .{ .hex = "#272729" }, .muted = .{ .hex = "#333336" }, .toned = .{ .hex = "#454549" }, .dimmed = .{ .hex = "#A5A5AB" }, .text = .{ .hex = "#E9E9EB" } }),
         .midnight => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#090A15" }, .elevated = .{ .hex = "#131528" }, .muted = .{ .hex = "#1E213D" }, .toned = .{ .hex = "#2D3156" }, .dimmed = .{ .hex = "#9A9EC4" }, .text = .{ .hex = "#E6E7F5" } }),
         .ocean => comptime ui.Theme.parseWithBase(ui.Theme.dark, .{ .bg = .{ .hex = "#0B121B" }, .elevated = .{ .hex = "#15212E" }, .muted = .{ .hex = "#213143" }, .toned = .{ .hex = "#30465D" }, .dimmed = .{ .hex = "#96A9BC" } }),

@@ -1,5 +1,7 @@
 # Releases and updates
 
+> The GitHub Actions workflows (`.github/workflows/ci.yml` and `release.yml`) have been removed, so pushes and tags no longer build anything. The pipeline described below is the design to restore from Git history when automated releases are wanted.
+
 Create a GitHub repository and enable Actions. Protect the `release` environment and set these public variables:
 
 | Variable | Purpose |
