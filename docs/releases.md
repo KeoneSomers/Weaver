@@ -4,7 +4,7 @@ Create a GitHub repository and enable Actions. Protect the `release` environment
 
 | Variable | Purpose |
 | --- | --- |
-| `WEAVER_OAUTH_CLIENT_ID` | OAuth app client ID, with device flow enabled |
+| `WEAVER_OAUTH_CLIENT_ID` | Optional OAuth app client ID, with device flow enabled. Without it, sign-in uses Git Credential Manager |
 | `WEAVER_UPDATE_PUBLIC_KEY` | 32-byte Ed25519 public key encoded as 64 lowercase hex characters |
 | `AZURE_SIGNING_ENDPOINT` | Artifact Signing regional service endpoint |
 | `AZURE_SIGNING_ACCOUNT` | Consistent validated publisher account |
@@ -13,7 +13,7 @@ Create a GitHub repository and enable Actions. Protect the `release` environment
 
 Secrets: `WEAVER_UPDATE_PRIVATE_KEY` (32-byte Ed25519 seed in hex), Azure OIDC identity (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`), and Apple (`APPLE_CERTIFICATE_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`). The update key is separate from OS signing certificates. Never commit private keys.
 
-The GitHub device flow requests `repo`, `read:user` and `workflow`. The workflow scope supports pushing changes to GitHub Actions files; see [GitHub's OAuth scope documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps). Configure an OAuth app with device flow enabled. Expiring-token refresh and GitHub Enterprise account support remain future work.
+The GitHub device flow requests `repo`, `read:user` and `workflow`. The workflow scope supports pushing changes to GitHub Actions files; see [GitHub's OAuth scope documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps). It is used only by builds given an OAuth client ID; other builds take the token from Git Credential Manager's own sign-in. Expiring-token refresh and GitHub Enterprise account support remain future work.
 
 Push a semantic version tag such as `v0.1.0`. The workflow builds Windows x64, Linux x64, macOS Intel and Apple Silicon. It signs Windows binaries and the Inno Setup installer, signs and notarizes macOS DMGs, packages Linux as AppImage, hashes the final installers, signs the exact manifest payload, and publishes all release assets only when packaging succeeds. Missing signing configuration fails the release. CI runs backend tests and compiles the GUI on each platform.
 

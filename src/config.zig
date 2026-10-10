@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const Theme = enum { dark, graphite, midnight, ocean, forest, plum, nord, light, sand, paper };
+pub const Theme = enum { dark, ultra_dark, graphite, midnight, ocean, forest, plum, nord, light, sand, paper };
 pub const TextSize = enum { small, medium, large, extra_large };
 pub const DiffFont = enum { mono, sans };
 pub const SettingValue = struct { id: []const u8, value: []const u8 };

@@ -102,7 +102,7 @@ fn loadMode(a: std.mem.Allocator, path: []const u8, changes: bool) !Snapshot {
                 defer c.git_reference_free(upstream);
                 snap.upstream = try arena.dupe(u8, std.mem.span(c.git_reference_shorthand(upstream)));
                 if (c.git_reference_target(upstream)) |upstream_oid| try check(c.git_graph_ahead_behind(&snap.ahead, &snap.behind, repo, oid, upstream_oid));
-            }
+            } else snap.ahead = try unpublished(repo);
         }
     }
     defer if (tree) |t| c.git_tree_free(t);
@@ -196,6 +196,20 @@ fn refs(a: std.mem.Allocator, repo: *c.Repository, remotes: bool) ![][]const u8 
         if (remotes or std.mem.startsWith(u8, value, "refs/heads/")) try values.append(a, try a.dupe(u8, if (remotes) value else value[11..]));
     };
     return values.toOwnedSlice(a);
+}
+/// Commits on HEAD that no remote-tracking branch has, for a branch without an
+/// upstream. Without a remote that is every commit, so local work stays visible.
+fn unpublished(repo: *c.Repository) !usize {
+    var walk: *c.Revwalk = undefined;
+    try check(c.git_revwalk_new(&walk, repo));
+    defer c.git_revwalk_free(walk);
+    try check(c.git_revwalk_push_head(walk));
+    try check(c.git_revwalk_hide_glob(walk, "refs/remotes/*"));
+    var count: usize = 0;
+    var oid: c.Oid = undefined;
+    // Bounded like history: this runs on every refresh.
+    while (count < 999 and c.git_revwalk_next(&oid, walk) == 0) count += 1;
+    return count;
 }
 fn history(a: std.mem.Allocator, repo: *c.Repository) ![]History {
     var walk: *c.Revwalk = undefined;

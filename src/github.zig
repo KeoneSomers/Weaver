@@ -56,6 +56,43 @@ test "HTTP authorization rejects config injection and preserves authenticated JS
     try std.testing.expect(std.mem.indexOf(u8, config, "data-binary = \"{\\\"name\\\":\\\"repository\\\"}\"") != null);
     try std.testing.expectError(error.InvalidToken, authorizationConfig(a, "bad\"\nurl=evil", null));
 }
+/// Confirm the token's account, then keep it in the OS credential store.
+fn remember(io: std.Io, a: std.mem.Allocator, token: []const u8) ![]const u8 {
+    const user = try request(io, a, "https://api.github.com/user", null, token);
+    defer a.free(user);
+    const profile = try std.json.parseFromSlice(std.json.Value, a, user, .{});
+    defer profile.deinit();
+    const login = profile.value.object.get("login") orelse return error.InvalidGitHubIdentity;
+    if (login != .string) return error.InvalidGitHubIdentity;
+    const name = try a.dupe(u8, login.string);
+    errdefer a.free(name);
+    try credentials.put(io, a, token);
+    return name;
+}
+/// Sign in through the Git credential helper configured for github.com, so no
+/// OAuth app is needed. Returns the account login.
+pub fn signIn(io: std.Io, a: std.mem.Allocator, environment: *const std.process.Environ.Map) ![]const u8 {
+    const filled = try process.credentialFill(io, a, environment);
+    defer {
+        @memset(filled.stdout, 0);
+        filled.deinit(a);
+    }
+    if (!filled.ok) return error.GitCredentialManagerSignInFailed;
+    return remember(io, a, credentialPassword(filled.stdout) orelse return error.GitCredentialManagerSignInFailed);
+}
+fn credentialPassword(output: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const field = std.mem.trimEnd(u8, line, "\r");
+        if (std.mem.startsWith(u8, field, "password=") and field.len > "password=".len) return field["password=".len..];
+    }
+    return null;
+}
+test "credential helper output yields only the password field" {
+    try std.testing.expectEqualStrings("gho_example", credentialPassword("protocol=https\r\nhost=github.com\r\nusername=octocat\r\npassword=gho_example\r\n").?);
+    try std.testing.expect(credentialPassword("protocol=https\nhost=github.com\nusername=password=x\n") == null);
+    try std.testing.expect(credentialPassword("password=\n") == null);
+}
 pub fn begin(io: std.Io, a: std.mem.Allocator, client: []const u8) !Device {
     if (client.len == 0 or std.mem.indexOfAny(u8, client, "&\n\r") != null) return error.ConfigureOAuthClientID;
     const body = try std.fmt.allocPrint(a, "client_id={s}&scope=repo%20read:user%20workflow", .{client});
@@ -77,15 +114,7 @@ pub fn poll(io: std.Io, a: std.mem.Allocator, client: []const u8, device: []cons
     }
     const parsed = try std.json.parseFromSlice(std.json.Value, a, data, .{});
     defer parsed.deinit();
-    if (parsed.value.object.get("access_token")) |token| {
-        const user = try request(io, a, "https://api.github.com/user", null, token.string);
-        defer a.free(user);
-        const profile = try std.json.parseFromSlice(std.json.Value, a, user, .{});
-        defer profile.deinit();
-        const login = profile.value.object.get("login") orelse return error.InvalidGitHubIdentity;
-        try credentials.put(io, a, token.string);
-        return .{ .complete = try a.dupe(u8, login.string) };
-    }
+    if (parsed.value.object.get("access_token")) |token| return .{ .complete = try remember(io, a, token.string) };
     const name = (parsed.value.object.get("error") orelse return error.InvalidOAuthResponse).string;
     if (std.mem.eql(u8, name, "authorization_pending")) return .pending;
     if (std.mem.eql(u8, name, "slow_down")) return .slow_down;

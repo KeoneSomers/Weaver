@@ -563,3 +563,57 @@ test "hydrated LFS objects stay clean and staging produces pointers" {
         try std.testing.expect(staged.files[0].staged);
     }
 }
+
+test "commits without an upstream count as unpushed until a remote branch has them" {
+    try git.init();
+    defer git.shutdown();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const remote = try std.fs.path.join(alloc, &.{ root, "remote.git" });
+    const local = try std.fs.path.join(alloc, &.{ root, "local" });
+    const identity = [_][]const u8{ "-c", "user.name=Weaver Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "--allow-empty", "-m" };
+    try command(root, &.{ "init", "--initial-branch=main", local });
+    {
+        var unborn = try provider.scan(io, a, local);
+        defer unborn.deinit();
+        try std.testing.expectEqual(@as(usize, 0), unborn.ahead);
+    }
+    try command(local, &(identity ++ .{"First"}));
+    try command(local, &(identity ++ .{"Second"}));
+    {
+        var offline = try provider.scan(io, a, local);
+        defer offline.deinit();
+        try std.testing.expectEqual(@as(usize, 0), offline.remotes.len);
+        try std.testing.expectEqualStrings("", offline.upstream);
+        try std.testing.expectEqual(@as(usize, 2), offline.ahead);
+    }
+    // Plain push without a destination is what the toolbar used to run.
+    {
+        const r = try provider.execute(io, a, local, .{ .operation = .push });
+        defer r.deinit(a);
+        try std.testing.expect(!r.ok);
+        try std.testing.expectEqual(@import("guidance.zig").Advice.connect_remote, @import("guidance.zig").advise(r.stderr, false));
+    }
+    try command(root, &.{ "init", "--bare", "--initial-branch=main", remote });
+    {
+        const r = try provider.execute(io, a, local, .{ .operation = .add_remote, .value = "origin", .second = remote });
+        defer r.deinit(a);
+        try std.testing.expect(r.ok);
+    }
+    {
+        const r = try provider.execute(io, a, local, .{ .operation = .publish, .value = "main", .second = "origin" });
+        defer r.deinit(a);
+        try std.testing.expect(r.ok);
+    }
+    try command(local, &.{ "switch", "-c", "feature" });
+    try command(local, &(identity ++ .{"Third"}));
+    var published = try provider.scan(io, a, local);
+    defer published.deinit();
+    try std.testing.expectEqualStrings("", published.upstream);
+    try std.testing.expectEqual(@as(usize, 1), published.ahead);
+}

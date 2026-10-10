@@ -12,6 +12,7 @@ const credentials = @import("credentials.zig");
 const process = @import("process.zig");
 const themes = @import("themes.zig");
 const icons = @import("icons.zig");
+const AppIcon = @import("app_icon.zig");
 const diff = @import("diff.zig");
 const file_picker = @import("file_picker.zig");
 const path_selection = @import("path_selection.zig");
@@ -19,7 +20,9 @@ const repository_watch = @import("repository_watch.zig");
 const refresh = @import("refresh.zig");
 const change_context = @import("change_context.zig");
 const remote_sync = @import("remote_sync.zig");
+const guidance = @import("guidance.zig");
 const ignore = @import("ignore.zig");
+const editor = @import("editor.zig");
 const options = @import("options");
 const Self = @This();
 const Rect = ui.component.Rect;
@@ -107,6 +110,7 @@ environment: *const std.process.Environ.Map,
 fetch_attempts: std.StringHashMap(i64),
 fetch_busy: bool = false,
 app: knots.App,
+app_icon: AppIcon,
 config: config_mod.Config,
 registry: plugins.Registry,
 provider: *const providers.Provider = &providers.git,
@@ -149,7 +153,15 @@ notice: []const u8 = "Ready. Add a local repository or clone a remote to begin."
 notice_owned: bool = false,
 notice_error: bool = false,
 add_open: bool = false,
+/// The add dialog was opened for a folder without a repository.
+setup_notice: bool = false,
 confirm_open: bool = false,
+remote_open: bool = false,
+/// Push once the remote added from the setup dialog exists.
+publish_after_connect: bool = false,
+failure_open: bool = false,
+failure_operation: model.Operation = .refresh,
+failure_text: []const u8 = "",
 /// Every glyph of the bundled Lucide font, for project icons.
 lucide: []icons.Glyph = &.{},
 icon_open: bool = false,
@@ -168,6 +180,7 @@ commit_input: std.ArrayList(u8) = .empty,
 filter_input: std.ArrayList(u8) = .empty,
 value_input: std.ArrayList(u8) = .empty,
 second_input: std.ArrayList(u8) = .empty,
+connect_input: std.ArrayList(u8) = .empty,
 extension_path: std.ArrayList(u8) = .empty,
 client_input: std.ArrayList(u8) = .empty,
 release_input: std.ArrayList(u8) = .empty,
@@ -191,14 +204,20 @@ update_checked: bool = false,
 pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map) !Self {
     var config = try config_mod.Config.init(io, a, env);
     errdefer config.deinit();
+    try AppIcon.prepare();
     var app = try knots.App.init(io, a, .{ .window = .{ .width = 1440, .height = 900, .title = "Weaver" }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
-    errdefer app.deinit();
+    var app_icon: AppIcon = .{};
+    errdefer {
+        app.deinit();
+        app_icon.deinit();
+    }
+    app_icon = try AppIcon.init(&app.main_viewport.window);
     try app.main_viewport.ui_ctx.ui.font.addFace("mono", @embedFile("mono_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("devicon", @embedFile("file_icon_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("lucide", @embedFile("toolbar_icon_font"));
     const lucide = try icons.glyphs(a, @embedFile("toolbar_icon_font"));
     errdefer a.free(lucide);
-    var self = Self{ .io = io, .a = a, .environment = env, .fetch_attempts = .init(a), .app = app, .config = config, .registry = try plugins.Registry.init(a), .lucide = lucide };
+    var self = Self{ .io = io, .a = a, .environment = env, .fetch_attempts = .init(a), .app = app, .app_icon = app_icon, .config = config, .registry = try plugins.Registry.init(a), .lucide = lucide };
     for (config.data.extensions) |state| {
         if (state.manifest_path.len > 0) self.registry.install(io, state.manifest_path) catch continue;
         for (self.registry.items.items) |*extension| if (std.mem.eql(u8, extension.manifest.id, state.id)) {
@@ -212,7 +231,7 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
             };
         };
     }
-    try self.client_input.appendSlice(a, if (config.data.oauth_client_id.len > 0) config.data.oauth_client_id else options.oauth_client_id);
+    try self.client_input.appendSlice(a, options.oauth_client_id);
     try self.release_input.appendSlice(a, if (config.data.release_repo.len > 0) config.data.release_repo else options.release_repo);
     self.split_diff = config.data.split_diff;
     return self;
@@ -220,6 +239,7 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
 pub fn deinit(self: *Self) void {
     // App shutdown joins/cancels background tasks before freeing their state.
     self.app.deinit();
+    self.app_icon.deinit();
     self.watcher.deinit(self.a);
     if (self.snapshot) |*s| s.deinit();
     if (self.revision) |*s| s.deinit();
@@ -229,8 +249,9 @@ pub fn deinit(self: *Self) void {
     self.a.free(self.loading_path);
     self.a.free(self.lucide);
     self.clearDiffRows();
-    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "extension_path", "client_input", "release_input", "icon_filter" }) |field| @field(self, field).deinit(self.a);
+    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter" }) |field| @field(self, field).deinit(self.a);
     if (self.notice_owned) self.a.free(self.notice);
+    self.a.free(self.failure_text);
     self.registry.deinit();
     var fetch_keys = self.fetch_attempts.keyIterator();
     while (fetch_keys.next()) |key| self.a.free(key.*);
@@ -462,7 +483,15 @@ fn perform(io: std.Io, a: std.mem.Allocator, job: *Job, result: *Result) !void {
                 if (!r.ok and (job.request.operation == .clone or job.request.operation == .initialize)) return;
             }
             const destination = if (job.request.operation == .clone) job.request.second else job.path;
-            result.snapshot = try job.provider.scan(io, a, destination);
+            result.snapshot = job.provider.scan(io, a, destination) catch |err| {
+                // A workspace folder that was moved or lost its repository: offer setup.
+                if (job.request.operation != .refresh or job.quiet) return err;
+                if ((git.discover(arena, job.path) catch return err) != null) return err;
+                result.setup_path = try arena.dupe(u8, job.path);
+                result.failed = true;
+                result.message = "This folder is not a Git repository any more. Initialize it, clone into it, or remove it from the workspace.";
+                return;
+            };
             if (result.message.len == 0) result.message = "Repository refreshed.";
         },
         .counts => result.snapshot = try job.provider.counts(io, a, job.path, job.files),
@@ -471,9 +500,14 @@ fn perform(io: std.Io, a: std.mem.Allocator, job: *Job, result: *Result) !void {
             result.revision = try job.provider.revision(a, job.path, job.request.value);
             result.message = "Showing committed changes.";
         },
-        .auth_begin => {
+        .auth_begin => if (job.client.len > 0) {
             result.device = try github.begin(io, arena, job.client);
             result.message = "Enter the displayed code at github.com/login/device.";
+        } else {
+            // Builds without an OAuth client ID sign in through Git Credential Manager.
+            const login = try github.signIn(io, arena, job.environment.?);
+            result.poll = .{ .complete = login };
+            result.message = try std.fmt.allocPrint(arena, "Signed in to GitHub as {s}.", .{login});
         },
         .auth_poll => {
             result.poll = try github.poll(io, arena, job.client, job.device);
@@ -593,7 +627,17 @@ fn done(view: *knots.View, frame_ctx: *ui.Frame, value: Result) !void {
         try self.path_input.appendSlice(self.a, folder);
         self.remote_input.clearRetainingCapacity();
         self.add_open = true;
+        self.setup_notice = true;
     }
+    if (result.failed and result.kind == .git and !result.quiet and guidance.guided(result.operation)) {
+        const copy = try diff.safeText(self.a, std.mem.trim(u8, result.message[0..@min(result.message.len, 8192)], " \t\r\n"));
+        self.a.free(self.failure_text);
+        self.failure_text = copy;
+        self.failure_operation = result.operation;
+        self.failure_open = true;
+    }
+    const connected = result.kind == .git and result.operation == .add_remote and !result.failed and self.publish_after_connect;
+    if (result.kind == .git and result.operation == .add_remote) self.publish_after_connect = false;
     const a = self.config.arena.allocator();
     if (result.snapshot) |snapshot| {
         if (!config_mod.equalPath(self.watcher.path, snapshot.path)) _ = self.watch_epoch.fetchAdd(1, .release);
@@ -690,6 +734,7 @@ fn done(view: *knots.View, frame_ctx: *ui.Frame, value: Result) !void {
         for (repos, copies) |repo, *copy| copy.* = .{ .full_name = try a.dupe(u8, repo.full_name), .clone_url = try a.dupe(u8, repo.clone_url), .ssh_url = try a.dupe(u8, repo.ssh_url), .private = repo.private, .description = if (repo.description) |d| try a.dupe(u8, d) else null };
         self.github_repositories = copies;
     }
+    if (connected) if (self.snapshot) |s| try self.launch(.git, s.path, .{ .operation = .publish, .value = s.branch, .second = "origin" });
     frame_ctx.requestRedraw();
 }
 fn refreshDetails(self: *Self) !void {
@@ -725,6 +770,23 @@ fn request(self: *Self, ctx: *ui.Frame, operation: model.Operation, value: []con
         self.pending_request = .{ .operation = operation, .value = try a.dupe(u8, value), .second = try a.dupe(u8, second) };
         self.confirm_open = true;
     } else if (self.path()) |p| try self.launch(.git, p, req);
+    ctx.requestRedraw();
+}
+/// Toolbar sync actions. Explains a missing remote, branch link or first commit
+/// before Git has to fail on it.
+fn sync(self: *Self, ctx: *ui.Frame, operation: model.Operation) !void {
+    const snapshot = self.snapshot orelse return;
+    if (!self.available()) return;
+    const remote = guidance.defaultRemote(snapshot.remotes) orelse return self.openRemoteSetup(ctx);
+    if (operation == .fetch or snapshot.upstream.len > 0) return self.request(ctx, operation, "", "");
+    if (operation == .push and snapshot.history.len > 0) return self.request(ctx, .publish, snapshot.branch, remote);
+    self.message(if (snapshot.history.len == 0) "There are no commits on this branch yet. Commit your changes first." else "This branch has not been pushed yet, so there is nothing to pull. Push it first.", false);
+    ctx.requestRedraw();
+}
+fn openRemoteSetup(self: *Self, ctx: *ui.Frame) void {
+    self.connect_input.clearRetainingCapacity();
+    self.failure_open = false;
+    self.remote_open = true;
     ctx.requestRedraw();
 }
 fn selectRepository(self: *Self, index: usize) !void {
@@ -789,6 +851,11 @@ const ChangeActions = struct {
         if (try app.menuAction(ctx, "copy-relative", .copy, "Copy relative path", true, false)) try ctx.writeClipboard(f.path);
         const absolute = try std.fs.path.resolve(ctx.arena(), &.{ app.snapshot.?.path, f.path });
         if (try app.menuAction(ctx, "copy-full", .copy_full, "Copy full path", true, false)) try ctx.writeClipboard(absolute);
+        // A deleted file has nothing to edit; a nested repository is listed as a folder.
+        const editable = !std.mem.eql(u8, f.status, "Deleted") and !std.mem.endsWith(u8, f.path, "/");
+        if (try app.menuAction(ctx, "edit", .edit, "Open in text editor", editable, false)) editor.open(app.io, app.a, absolute) catch {
+            app.message("Could not open the file in your text editor.", true);
+        };
         if (try app.menuAction(ctx, "reveal", .reveal, folderActionLabel(), true, false)) {
             // A deleted file's directory may have disappeared too.
             var folder = std.fs.path.dirname(absolute) orelse app.snapshot.?.path;
@@ -961,7 +1028,9 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     const main = Rect{ .key = .str("main"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .gap = 10 } };
     _ = try main.open(ctx);
     try self.toolbar(ctx);
-    if (self.snapshot) |snapshot| if (snapshot.state != .normal) try self.recovery(ctx, snapshot);
+    if (self.snapshot) |snapshot| {
+        if (snapshot.state != .normal) try self.recovery(ctx, snapshot) else if (self.provider.capabilities.remotes and !self.read_busy and (self.page == .changes or self.page == .history)) try self.nextStep(ctx, snapshot);
+    }
     switch (self.page) {
         .changes, .history => try self.worktree(ctx),
         .operations => try self.operations(ctx),
@@ -1041,10 +1110,7 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     _ = try panel.open(ctx);
     const brand = Rect{ .key = .str("brand-row"), .style = &.{ .direction = .row, .gap = 10, .@"align" = .center, .padding = .xy(6, 10) } };
     _ = try brand.open(ctx);
-    const mark = Rect{ .key = .str("brand-badge"), .style = &.{ .width = .fixed(30), .height = .fixed(30), .background = themes.selection(ctx.ui().theme), .radius = .md, .justify = .center, .@"align" = .center } };
-    _ = try mark.open(ctx);
-    try ctx.e(Text{ .key = .str("brand-mark"), .content = "W", .style = &.{ .font_size = .lg, .foreground = .accent } });
-    try mark.close(ctx);
+    try ctx.e(ui.component.Image{ .key = .str("brand-mark"), .source = .{ .pixels = .{ .data = @embedFile("app_icon_pixels"), .width = 64, .height = 64, .upload_policy = .versioned } }, .style = &.{ .width = .fixed(30), .height = .fixed(30) } });
     try ctx.e(Text{ .key = .str("brand"), .content = "weaver", .style = &.{ .font_size = .lg, .foreground = .text } });
     try brand.close(ctx);
     try sectionLabel(ctx, "workspace-label", "Workspace");
@@ -1203,7 +1269,7 @@ fn toolbar(self: *Self, ctx: *ui.Frame) !void {
     const title = Rect{ .key = .str("toolbar-title"), .style = &.{ .width = .grow(), .direction = .column, .gap = 3 } };
     _ = try title.open(ctx);
     try ctx.e(Text{ .key = .str("repo-title"), .content = try diff.safeText(ctx.arena(), if (self.busy and self.loading_path.len > 0) std.fs.path.basename(std.mem.trimEnd(u8, self.loading_path, "/\\")) else if (self.path()) |p| std.fs.path.basename(std.mem.trimEnd(u8, p, "/\\")) else "Your next idea starts here"), .style = &.{ .font_size = .lg } });
-    try label(ctx, "branch", if (self.read_busy) "Scanning repository changes…" else if (self.snapshot) |s| try std.fmt.allocPrint(ctx.arena(), "\u{e8d4}  {s}   ·   {s}   ·   {d} ahead, {d} behind", .{ s.branch, self.provider.name, s.ahead, s.behind }) else "A native home for your repositories", .dimmed);
+    try label(ctx, "branch", if (self.read_busy) "Scanning repository changes…" else if (self.snapshot) |s| try std.fmt.allocPrint(ctx.arena(), "\u{e8d4}  {s}   ·   {s}   ·   {s}", .{ s.branch, self.provider.name, try syncSummary(ctx.arena(), s) }) else "A native home for your repositories", .dimmed);
     try title.close(ctx);
     const ready = self.available() and self.snapshot != null;
     if (self.snapshot) |snapshot| if (self.provider.capabilities.branches and snapshot.branches.len > 0) {
@@ -1221,11 +1287,36 @@ fn toolbar(self: *Self, ctx: *ui.Frame) !void {
     if (self.provider.capabilities.remotes) {
         const behind = if (self.snapshot) |s| s.behind else 0;
         const ahead = if (self.snapshot) |s| s.ahead else 0;
-        if (try toolbarButton(ctx, .fetch, ready, 0, self.fetch_busy or self.active_operation == .fetch)) try self.request(ctx, .fetch, "", "");
-        if (try toolbarButton(ctx, .pull, ready, behind, self.active_operation == .pull)) try self.request(ctx, .pull, "", "");
-        if (try toolbarButton(ctx, .push, ready, ahead, self.active_operation == .push)) try self.request(ctx, .push, "", "");
+        if (try toolbarButton(ctx, .fetch, ready, 0, self.fetch_busy or self.active_operation == .fetch)) try self.sync(ctx, .fetch);
+        if (try toolbarButton(ctx, .pull, ready, behind, self.active_operation == .pull)) try self.sync(ctx, .pull);
+        if (try toolbarButton(ctx, .push, ready, ahead, self.active_operation == .push or self.active_operation == .publish)) try self.sync(ctx, .push);
     }
     try actions.close(ctx);
+    try bar.close(ctx);
+}
+/// Where the branch stands against its remote, in words that say whether one exists.
+fn syncSummary(a: std.mem.Allocator, s: model.Snapshot) ![]const u8 {
+    if (s.upstream.len > 0) return std.fmt.allocPrint(a, "{d} ahead, {d} behind", .{ s.ahead, s.behind });
+    const commits = try std.fmt.allocPrint(a, "{d} {s}", .{ s.ahead, if (s.ahead == 1) "commit" else "commits" });
+    if (s.remotes.len == 0) return std.fmt.allocPrint(a, "{s} on this computer only, no remote", .{commits});
+    return std.fmt.allocPrint(a, "{s} not pushed yet", .{commits});
+}
+/// A next step for a repository that cannot sync yet.
+fn nextStep(self: *Self, ctx: *ui.Frame, snapshot: model.Snapshot) !void {
+    const remote = guidance.defaultRemote(snapshot.remotes);
+    if (remote != null and (snapshot.upstream.len > 0 or snapshot.history.len == 0)) return;
+    const bar = Rect{ .key = .str("next-step"), .style = &.{ .width = .grow(), .padding = .xy(14, 8), .gap = 10, .direction = .row, .@"align" = .center, .background = .elevated, .radius = .{ .fixed = 14 } } };
+    _ = try bar.open(ctx);
+    const text = if (remote) |name|
+        try std.fmt.allocPrint(ctx.arena(), "{s} has not been pushed to {s} yet. Your commits are saved on this computer.", .{ snapshot.branch, name })
+    else if (snapshot.history.len == 0)
+        "This repository has no remote. Connect one now, or after your first commit."
+    else
+        "This repository has no remote, so your commits are saved on this computer only. Connect one to back them up and share them.";
+    try ctx.e(Text{ .key = .str("next-step-text"), .content = try diff.safeText(ctx.arena(), text), .style = &.{ .width = .grow(), .wrap = true, .foreground = .dimmed, .font_size = .xs } });
+    if (remote) |name| {
+        if (try self.operationButton(ctx, "next-step-publish", "Publish branch", self.available(), true, .publish)) try self.request(ctx, .publish, snapshot.branch, name);
+    } else if (try button(ctx, "next-step-connect", "Connect a remote…", self.available(), true)) self.openRemoteSetup(ctx);
     try bar.close(ctx);
 }
 fn recovery(self: *Self, ctx: *ui.Frame, snapshot: model.Snapshot) !void {
@@ -1661,12 +1752,19 @@ fn renderHunkDivider(ctx: *ui.Frame, line: diff.Line, i: usize) !void {
     try ctx.e(Text{ .key = ui.Key.str("hunk-range").indexed(i), .content = try diff.hunkLabel(ctx.arena(), line.text), .style = &.{ .width = .grow(), .overflow = .hidden, .foreground = .dimmed, .font_size = .xs }, .selectable = false });
     try bar.close(ctx);
 }
-fn empty(_: *Self, ctx: *ui.Frame) !void {
+fn empty(self: *Self, ctx: *ui.Frame) !void {
     const panel = Rect{ .key = .str("welcome"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .padding = .all(32), .gap = 12, .justify = .center, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try panel.open(ctx);
     try ctx.e(Text{ .key = .str("welcome-title"), .content = "Good work starts\nwith a little clarity.", .style = &.{ .font_size = .xl } });
     try label(ctx, "welcome-copy", "Bring your repositories together. See what changed. Ship with confidence.", .dimmed);
     try label(ctx, "welcome-details", "Add a local folder, drop one here, or clone from GitHub and other remotes.", .dimmed);
+    const actions = try row(ctx, "welcome-actions");
+    if (try button(ctx, "welcome-add", "Add a local folder…", self.available(), true)) {
+        self.remote_input.clearRetainingCapacity();
+        try self.browse(.folder, &self.path_input, false, "Choose a repository folder");
+    }
+    if (try button(ctx, "welcome-clone", "Clone or create…", self.available(), false)) self.add_open = true;
+    try actions.close(ctx);
     try panel.close(ctx);
 }
 fn operations(self: *Self, ctx: *ui.Frame) !void {
@@ -2029,17 +2127,13 @@ fn githubSettings(self: *Self, ctx: *ui.Frame) !void {
     const login = self.config.data.github_login;
     const card = try settingGroup(ctx, "github-account");
     const account = try settingRow(ctx, "github-status", "Account", if (login.len > 0) try std.fmt.allocPrint(ctx.arena(), "Signed in as {s}", .{login}) else "Not signed in on this computer.", true, false);
-    if (try button(ctx, "github-sign-out", "Sign out", self.available(), false)) try self.launch(.sign_out, "", .{ .operation = .refresh });
-    try account.close(ctx);
-    const client = try settingRow(ctx, "github-client-row", "OAuth client ID", "From a GitHub OAuth app with device flow enabled.", false, true);
-    const client_line = try row(ctx, "github-client-line");
-    try ctx.e(TextInput{ .key = .str("github-client"), .buf = &self.client_input, .placeholder = "GitHub OAuth client ID", .style = &.{ .width = .fixed(420), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
-    if (try button(ctx, "github-sign-in", "Sign in with GitHub", self.available() and self.client_input.items.len > 0, true)) {
-        try self.saveSettings();
+    if (login.len > 0) {
+        if (try button(ctx, "github-sign-out", "Sign out", self.available(), false)) try self.launch(.sign_out, "", .{ .operation = .refresh });
+    } else if (try button(ctx, "github-sign-in", "Sign in with GitHub", self.available() and self.device == null, true)) {
         try self.launch(.auth_begin, "", .{ .operation = .refresh });
+        if (self.client_input.items.len == 0) self.message("Finish signing in to GitHub in the window that opens.", false);
     }
-    try client_line.close(ctx);
-    try client.close(ctx);
+    try account.close(ctx);
     if (self.device) |device| {
         const code = try settingRow(ctx, "device-code", try std.fmt.allocPrint(ctx.arena(), "Your code: {s}", .{device.user_code}), "Open https://github.com/login/device in your browser and enter this code.", false, true);
         const code_line = try row(ctx, "device-code-line");
@@ -2049,7 +2143,7 @@ fn githubSettings(self: *Self, ctx: *ui.Frame) !void {
         try code.close(ctx);
     }
     try card.close(ctx);
-    try label(ctx, "github-storage", "Credentials use Windows Credential Manager, macOS Keychain, or Linux Secret Service.\nOther hosts use Git credential helpers and your configured SSH client.", .dimmed);
+    try label(ctx, "github-storage", "Sign-in uses Git Credential Manager, included with Git for Windows. Weaver remembers the account in\nWindows Credential Manager, macOS Keychain, or Linux Secret Service. Other hosts use Git credential helpers and your configured SSH client.", .dimmed);
 }
 fn updateSettings(self: *Self, ctx: *ui.Frame) !void {
     const card = try settingGroup(ctx, "update-options");
@@ -2172,10 +2266,14 @@ fn githubPage(self: *Self, ctx: *ui.Frame) !void {
 }
 fn dialogs(self: *Self, ctx: *ui.Frame) !void {
     try self.iconDialog(ctx);
+    try self.remoteDialog(ctx);
+    try self.failureDialog(ctx);
+    if (!self.add_open) self.setup_notice = false;
     if (self.add_open) {
         const dialog = ui.component.Dialog{ .key = .str("add-dialog"), .is_open = &self.add_open, .style = &.{ .width = .fixed(600), .gap = 14 } };
         _ = try dialog.open(ctx);
         try heading(ctx, "Add a repository", "Open an existing folder, initialize a new one, or clone a remote.");
+        if (self.setup_notice) try wrapped(ctx, "setup-notice", "This folder is not a Git repository yet. Initialize it to start tracking changes here, or enter a URL below to clone into it.", .warning);
         const folder_row = try row(ctx, "add-path-row");
         try ctx.e(TextInput{ .key = .str("add-path"), .buf = &self.path_input, .placeholder = "Choose a local repository folder", .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
         if (try button(ctx, "browse-repository", "Browse…", self.available() and !self.picker_open, false)) try self.browse(.folder, &self.path_input, false, if (self.remote_input.items.len > 0) "Choose an empty folder to clone into" else "Choose a repository folder");
@@ -2187,10 +2285,10 @@ fn dialogs(self: *Self, ctx: *ui.Frame) !void {
         if (self.remote_input.items.len > 0) try label(ctx, "clone-folder-help", "For cloning, choose or create an empty folder in the file picker.", .dimmed);
         const actions = try row(ctx, "add-actions");
         const ready = self.available() and std.fs.path.isAbsolute(self.path_input.items);
-        if (try button(ctx, "open-repo", "Open folder", ready, true)) {
+        if (try button(ctx, "open-repo", "Open folder", ready, !self.setup_notice)) {
             try self.openLocal(self.path_input.items);
         }
-        if (try button(ctx, "init-repo", "Initialize", ready, false)) {
+        if (try button(ctx, "init-repo", "Initialize", ready, self.setup_notice)) {
             try std.Io.Dir.cwd().createDirPath(self.io, self.path_input.items);
             try self.launch(.git, self.path_input.items, .{ .operation = .initialize });
             self.add_open = false;
@@ -2229,6 +2327,112 @@ fn dialogs(self: *Self, ctx: *ui.Frame) !void {
         try actions.close(ctx);
         _ = try dialog.closeResponse(ctx);
     }
+}
+/// First-remote setup, opened wherever a sync action finds no remote.
+fn remoteDialog(self: *Self, ctx: *ui.Frame) !void {
+    const snapshot = self.snapshot orelse {
+        self.remote_open = false;
+        return;
+    };
+    if (snapshot.remotes.len > 0) self.remote_open = false;
+    if (!self.remote_open) return;
+    const dialog = ui.component.Dialog{ .key = .str("remote-dialog"), .is_open = &self.remote_open, .style = &.{ .width = .fixed(600), .gap = 14 } };
+    _ = try dialog.open(ctx);
+    try heading(ctx, "Connect a remote", "A remote is the online copy of this repository, for example on GitHub. Pushing sends your commits there.");
+    const has_commits = snapshot.history.len > 0;
+    try label(ctx, "remote-status", if (has_commits)
+        try std.fmt.allocPrint(ctx.arena(), "{d} {s} on {s} {s} saved on this computer and ready to push.", .{ snapshot.ahead, if (snapshot.ahead == 1) "commit" else "commits", snapshot.branch, if (snapshot.ahead == 1) "is" else "are" })
+    else
+        "There are no commits yet. You can connect now and push after your first commit.", .text);
+    const url_row = try row(ctx, "remote-url-row");
+    try ctx.e(TextInput{ .key = .str("remote-url"), .buf = &self.connect_input, .placeholder = "https://github.com/you/project.git or git@github.com:you/project.git", .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
+    if (try button(ctx, "remote-browse", "Local folder…", self.available() and !self.picker_open, false)) try self.browse(.folder, &self.connect_input, false, "Choose a local remote repository");
+    try url_row.close(ctx);
+    const url = std.mem.trim(u8, self.connect_input.items, " \t\r\n");
+    const valid = process.validRemote(url);
+    if (url.len > 0 and !valid) {
+        try wrapped(ctx, "remote-invalid", "Enter an https://, ssh:// or git@ address, or the full path of a folder.", .warning);
+    } else try wrapped(ctx, "remote-help", "No repository online yet? Create an empty one, without a README or license, then paste its address here. It is saved as \"origin\".", .dimmed);
+    const actions = try row(ctx, "remote-actions");
+    const ready = self.available() and valid;
+    var connect = false;
+    if (has_commits and try button(ctx, "remote-connect-push", "Connect and push", ready, true)) {
+        connect = true;
+        self.publish_after_connect = true;
+    }
+    if (try button(ctx, "remote-connect", "Connect only", ready, !has_commits)) connect = true;
+    if (try button(ctx, "remote-create", "Create on GitHub", true, false)) openPath(self.io, self.a, "https://github.com/new") catch {
+        self.message("Could not open your browser.", true);
+    };
+    if (try button(ctx, "remote-cancel", "Cancel", true, false)) self.remote_open = false;
+    try actions.close(ctx);
+    _ = try dialog.closeResponse(ctx);
+    if (connect) {
+        self.remote_open = false;
+        try self.request(ctx, .add_remote, "origin", url);
+    }
+}
+/// Explains a failed remote operation and offers the step that fixes it.
+fn failureDialog(self: *Self, ctx: *ui.Frame) !void {
+    if (!self.failure_open) return;
+    const op = self.failure_operation;
+    const snapshot = self.snapshot;
+    const remote = if (snapshot) |s| guidance.defaultRemote(s.remotes) else null;
+    const linked = if (snapshot) |s| s.upstream.len > 0 else false;
+    const advice = guidance.advise(self.failure_text, remote != null or op == .clone);
+    const dialog = ui.component.Dialog{ .key = .str("failure-dialog"), .is_open = &self.failure_open, .style = &.{ .width = .fixed(600), .gap = 14 } };
+    _ = try dialog.open(ctx);
+    try ctx.e(Text{ .key = .str("failure-title"), .content = switch (op) {
+        .pull => "Pull did not finish",
+        .fetch => "Fetch did not finish",
+        .clone => "Clone did not finish",
+        .add_remote => "The remote was not connected",
+        else => "Push did not finish",
+    }, .style = &.{ .font_size = .lg } });
+    try wrapped(ctx, "failure-summary", if (advice == .pull_first and !linked)
+        "The remote branch already has commits this branch does not share, often a README added when the repository was created. Connect an empty repository, or merge the remote branch from Repository tools."
+    else
+        advice.summary(), .dimmed);
+    if (op == .push or op == .publish) try label(ctx, "failure-safe", "Your commits are still saved on this computer.", .text);
+    if (self.failure_text.len > 0) {
+        const output = Rect{ .key = .str("failure-output"), .style = comptime &.{ .width = .grow(), .height = .{ .kind = .fit, .max = 180 }, .padding = .xy(12, 10), .radius = .md, .background = .muted, .overflow = .scroll_y } };
+        _ = try output.open(ctx);
+        try ctx.e(Text{ .key = .str("failure-text"), .content = self.failure_text, .style = &.{ .width = .grow(), .wrap = true, .font = "mono", .font_size = .xs, .foreground = .dimmed } });
+        try output.close(ctx);
+    }
+    const actions = try row(ctx, "failure-actions");
+    const ready = self.available();
+    const tools = advice == .diverged or advice == .unreachable_remote or (advice == .pull_first and !linked) or (advice == .connect_remote and remote != null);
+    if (op == .clone) {
+        if (try button(ctx, "failure-retry", "Edit and try again", ready, true)) {
+            self.failure_open = false;
+            self.add_open = true;
+        }
+    } else if (advice == .connect_remote and remote == null) {
+        if (try button(ctx, "failure-connect", "Connect a remote…", ready, true)) self.openRemoteSetup(ctx);
+    } else if (advice == .publish and remote != null and snapshot.?.history.len > 0) {
+        if (try button(ctx, "failure-publish", "Publish branch", ready, true)) {
+            self.failure_open = false;
+            try self.request(ctx, .publish, snapshot.?.branch, remote.?);
+        }
+    } else if (advice == .pull_first and linked) {
+        if (try button(ctx, "failure-pull", "Pull", ready, true)) {
+            self.failure_open = false;
+            try self.request(ctx, .pull, "", "");
+        }
+    } else if (advice == .sign_in and self.sectionVisible(.github)) {
+        if (try button(ctx, "failure-sign-in", "Open GitHub settings", true, true)) {
+            self.failure_open = false;
+            self.page = .settings;
+            self.settings_section = .github;
+        }
+    } else if (tools and try button(ctx, "failure-tools", "Open Repository tools", self.canNavigate(), true)) {
+        self.failure_open = false;
+        self.page = .operations;
+    }
+    if (try button(ctx, "failure-close", "Close", true, false)) self.failure_open = false;
+    try actions.close(ctx);
+    _ = try dialog.closeResponse(ctx);
 }
 fn browse(self: *Self, kind: file_picker.Kind, input: *std.ArrayList(u8), repository_relative: bool, title: []const u8) !void {
     if (self.busy or self.picker_open) return;
@@ -2279,6 +2483,10 @@ fn showPicker(self: *Self, kind: file_picker.Kind, input: *std.ArrayList(u8), re
 }
 fn label(ctx: *ui.Frame, key: []const u8, content: []const u8, color: ui.Color.Input) !void {
     try ctx.e(Text{ .key = .str(key), .content = try diff.safeText(ctx.arena(), content), .style = &.{ .foreground = color, .font_size = .xs } });
+}
+/// A label that wraps inside its container, for sentences in dialogs.
+fn wrapped(ctx: *ui.Frame, key: []const u8, content: []const u8, color: ui.Color.Input) !void {
+    try ctx.e(Text{ .key = .str(key), .content = try diff.safeText(ctx.arena(), content), .style = &.{ .width = .grow(), .wrap = true, .foreground = color, .font_size = .xs } });
 }
 fn sectionLabel(ctx: *ui.Frame, key: []const u8, content: []const u8) !void {
     try ctx.e(Text{ .key = .str(key), .content = content, .selectable = false, .style = &.{ .foreground = .dimmed, .font_size = .xs, .padding = .xy(10, 6) } });

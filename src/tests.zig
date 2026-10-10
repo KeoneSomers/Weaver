@@ -11,6 +11,7 @@ test {
     _ = @import("repository_watch.zig");
     _ = @import("refresh.zig");
     _ = @import("remote_sync.zig");
+    _ = @import("guidance.zig");
     _ = @import("repository_links.zig");
     _ = @import("ignore.zig");
     _ = @import("icons.zig");

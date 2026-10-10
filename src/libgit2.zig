@@ -51,6 +51,7 @@ pub extern "git2" fn git_commit_free(*Commit) void;
 pub extern "git2" fn git_tree_free(*Tree) void;
 pub extern "git2" fn git_revwalk_new(**Revwalk, *Repository) c_int;
 pub extern "git2" fn git_revwalk_push_head(*Revwalk) c_int;
+pub extern "git2" fn git_revwalk_hide_glob(*Revwalk, [*:0]const u8) c_int;
 pub extern "git2" fn git_revwalk_sorting(*Revwalk, c_uint) c_int;
 pub extern "git2" fn git_revwalk_next(*Oid, *Revwalk) c_int;
 pub extern "git2" fn git_revwalk_free(*Revwalk) void;

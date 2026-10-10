@@ -22,7 +22,7 @@ Windows: install Zig with `zvm install 0.17.0`, CMake and Ninja, then:
 
 Linux needs Wayland development packages (`libwayland-dev`, `wayland-protocols`, `libxkbcommon-dev`, `libdbus-1-dev`, `pkg-config`), a desktop portal with a FileChooser backend, and a Vulkan 1.3 driver. macOS uses WebGPU. On Linux/macOS run `sh scripts/bootstrap.sh`, then `zig build` and `zig build run`.
 
-Runtime requirements: Git, curl, and Git LFS for LFS repositories. Existing Git credential helpers, SSH configuration and agents remain available. Linux secure GitHub storage requires `secret-tool`. Tokens never go in settings or remote URLs.
+Runtime requirements: Git, curl, and Git LFS for LFS repositories. Existing Git credential helpers, SSH configuration and agents remain available. GitHub sign-in needs Git Credential Manager, which Git for Windows includes; install it separately on macOS and Linux. Linux secure GitHub storage requires `secret-tool`. Tokens never go in settings or remote URLs.
 
 ```text
 zig build test -Dheadless=true
@@ -37,10 +37,11 @@ zig-out/bin/weaver-check /absolute/path/to/repository
 - Native folder pickers for repository/clone locations, a JSON file picker for extension manifests, and file/folder pickers for path-based repository tools. Paths remain editable; cancelling preserves the previous value. Tool selections outside the current repository are rejected.
 - Associate remotes using repository tools; clone GitHub public/private repositories with HTTPS or SSH.
 - View staged and unstaged changes separately, file-type symbols, addition/deletion counts, highlighted unified diffs and commit history.
-- Long change paths and project names truncate with an ellipsis; hover to see the full text. Right-click changes to view, stage/unstage, copy paths, open the containing folder, add the file, its folder or its file type to the root `.gitignore`, or discard tracked edits with confirmation. Right-click projects to open/refresh, open the folder or remote in a browser, copy the path, move the entry up, down, to the top or to the bottom of the list, or remove the workspace entry while keeping files on disk. Menu rows carry Lucide icons; discard and remove are shown in red.
+- Long change paths and project names truncate with an ellipsis; hover to see the full text. Right-click changes to view, stage/unstage, copy paths, open the file in the operating system's default text editor, open the containing folder, add the file, its folder or its file type to the root `.gitignore`, or discard tracked edits with confirmation. Right-click projects to open/refresh, open the folder or remote in a browser, copy the path, move the entry up, down, to the top or to the bottom of the list, or remove the workspace entry while keeping files on disk. Menu rows carry Lucide icons; discard and remove are shown in red.
 - Switch between unified and side-by-side diffs; stage/unstage individual hunks, files or all changes; commit the staged set. Git identity, hooks, signing and LFS filters use your Git configuration.
 - Compact Lucide toolbar buttons for refresh, fetch, pull and push, with full labels on hover and keyboard focus. Push and Pull highlight only when the current branch is ahead of or behind its upstream, with commit-count badges; zero counts stay hidden. Fetch, fast-forward pull, push, publish branches; create/switch/delete branches; merge, rebase, continue/abort; stash/pop; tag/delete; revert/cherry-pick; discard tracked edits with confirmation.
-- GitHub device-flow authentication, OS credential storage and repository listing. Set the public OAuth client ID later in Settings.
+- Guided setup: a repository without a remote shows its local commit count on Push and a banner with a Connect a remote dialog, which adds `origin` and can push straight away. Push on a branch without an upstream publishes it. Failed push, pull, fetch, clone and remote setup open a dialog with Git's output and the next step. A workspace folder that is no longer a repository reopens the add dialog with Initialize and Clone.
+- One-click GitHub sign-in through Git Credential Manager (included with Git for Windows), with no OAuth app or token to create. Weaver remembers the account in the OS credential store and lists your repositories. Builds given `-Doauth-client-id` use GitHub's device flow instead.
 - LFS setup, tracking, transfers, status and locks. The provider reconciles externally filtered file status through Git to avoid treating hydrated LFS files as modified.
 - Rounded island workspace, five themes and a custom accent; offline Devicon file-type icons, persisted workspace/settings and bundled/installable extensions.
 - Native branch picker and conflict recovery: inspect conflict markers, keep either side, stage edited resolutions, then continue or abort merges, rebases and cherry-picks.
@@ -57,7 +58,7 @@ Local validation: 25 release-safety backend tests cover native snapshots, unborn
 
 Large-repository measurements and the progressive loading design are in [repository performance](docs/performance.md).
 
-See [extension API](docs/extensions.md) and [signing/release setup](docs/releases.md). OAuth and release endpoints are intentionally unconfigured until you create the GitHub app/repository. Release signing needs your own validated credentials.
+See [extension API](docs/extensions.md) and [signing/release setup](docs/releases.md). Release endpoints are intentionally unconfigured until you create the GitHub repository; an OAuth app is optional. Release signing needs your own validated credentials.
 
 ## Third-party notices
 

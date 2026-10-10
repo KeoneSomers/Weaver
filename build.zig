@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }) });
         installer.root_module.addOptions("options", options);
+        installer.root_module.addObjectFile(b.path("assets/weaver.res"));
         b.step("bootstrap", "Build the stable signed Windows bootstrap installer").dependOn(&b.addInstallArtifact(installer, .{}).step);
     }
     const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mono_font", b.createModule(.{ .root_source_file = b.path("assets/JetBrainsMono.ttf") }));
     exe.root_module.addImport("file_icon_font", b.createModule(.{ .root_source_file = b.path("assets/devicon.ttf") }));
     exe.root_module.addImport("toolbar_icon_font", b.createModule(.{ .root_source_file = b.path("assets/lucide.ttf") }));
+    exe.root_module.addImport("app_icon_pixels", b.createModule(.{ .root_source_file = b.path("assets/weaver.rgba") }));
     linkGit(b, exe.root_module, prefix, target.result.os.tag);
     linkDialogs(b, exe.root_module, target.result.os.tag);
     b.installArtifact(exe);
@@ -88,6 +90,10 @@ pub fn build(b: *std.Build) void {
         b.installFile(b.fmt("{s}/bin/libgit2.dll", .{prefix}), "bin/libgit2.dll");
     }
     const run = b.addRunArtifact(exe);
+    if (target.result.os.tag == .linux) {
+        b.installFile("packaging/linux/weaver.desktop", "share/applications/weaver.desktop");
+        b.installDirectory(.{ .source_dir = b.path("assets/icons/hicolor"), .install_dir = .prefix, .install_subdir = "share/icons/hicolor" });
+    }
     run.step.dependOn(b.getInstallStep());
     b.step("run", "Run Weaver").dependOn(&run.step);
 }

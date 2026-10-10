@@ -29,6 +29,6 @@ Source: "{#SourceDir}\weaver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 [Icons]
-Name: "{group}\Weaver"; Filename: "{app}\weaver.exe"
+Name: "{group}\Weaver"; Filename: "{app}\weaver.exe"; AppUserModelID: "app.weaver.desktop"
 [Run]
 Filename: "{app}\weaver.exe"; Description: "Launch Weaver"; Flags: nowait postinstall skipifsilent

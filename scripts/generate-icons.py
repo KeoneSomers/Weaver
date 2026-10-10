@@ -1,22 +1,27 @@
-"""Export Weaver's code-defined vector mark as native application icons."""
+"""Export approved Weaver artwork; requires Pillow (python -m pip install pillow)."""
 from pathlib import Path
 import struct
-from PIL import Image, ImageDraw
+from PIL import Image
 
 root = Path(__file__).resolve().parents[1]
-scale = 8
-canvas = Image.new("RGBA", (256 * scale, 256 * scale))
-draw = ImageDraw.Draw(canvas)
-draw.rounded_rectangle(tuple(v * scale for v in (8, 8, 248, 248)), radius=56 * scale, fill="#222326")
-points = [(55, 74), (89, 182), (128, 105), (167, 182), (201, 74)]
-draw.line([(x * scale, y * scale) for x, y in points], fill="#B4A0FF", width=19 * scale, joint="curve")
-for x, y in points:
-    r = 9.5
-    draw.ellipse(((x-r)*scale, (y-r)*scale, (x+r)*scale, (y+r)*scale), fill="#B4A0FF")
-icon = canvas.resize((1024, 1024), Image.Resampling.LANCZOS)
+source = Image.open(root / "assets/weaver-source.png").convert("RGBA")
+if source.width != source.height or source.width < 1024:
+    raise ValueError("The approved source must be square and at least 1024 pixels wide")
+if source.getchannel("A").getextrema() != (0, 255):
+    raise ValueError("The approved source must preserve transparent corners")
+icon = source.resize((1024, 1024), Image.Resampling.LANCZOS)
 icon.save(root / "assets/weaver.png")
 icon.save(root / "assets/weaver.icns")
-icon.save(root / "assets/weaver.ico", sizes=[(n, n) for n in (16, 24, 32, 48, 64, 128, 256)])
+icon.save(root / "assets/weaver.ico", sizes=[(n, n) for n in (16, 20, 24, 32, 40, 48, 64, 96, 128, 192, 256)])
+
+# Freedesktop hicolor icons cover launcher/taskbar sizes and HiDPI displays.
+for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
+    directory = root / f"assets/icons/hicolor/{size}x{size}/apps"
+    directory.mkdir(parents=True, exist_ok=True)
+    source.resize((size, size), Image.Resampling.LANCZOS).save(directory / "weaver.png")
+
+# KnotsUI accepts raw pixels. Embed a small version without a runtime PNG decoder.
+(root / "assets/weaver.rgba").write_bytes(source.resize((64, 64), Image.Resampling.LANCZOS).tobytes())
 
 # A standard .res embeds icons without requiring an external Windows RC tool.
 ico = (root / "assets/weaver.ico").read_bytes()
@@ -33,3 +38,4 @@ for index in range(count):
     group += entry[:12] + struct.pack("<H", index + 1)
 result += resource(14, 1, group)
 (root / "assets/weaver.res").write_bytes(result)
+print("Exported Weaver PNG, ICO, ICNS, Windows resources, hicolor sizes and UI pixels")

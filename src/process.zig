@@ -1,4 +1,5 @@
 const std = @import("std");
+const credentials = @import("credentials.zig");
 pub const Result = struct {
     stdout: []u8,
     stderr: []u8,
@@ -43,6 +44,16 @@ fn runWithEnvironment(io: std.Io, a: std.mem.Allocator, argv: []const []const u8
         else => false,
     } };
 }
+/// Starts a desktop launcher without pipes, so the application it opens cannot
+/// hold them and stall the caller. Returns whether the launcher succeeded.
+pub fn launch(io: std.Io, argv: []const []const u8) !bool {
+    var child = try std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore, .create_no_window = true });
+    defer child.kill(io);
+    return switch (try child.wait(io)) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+}
 fn writeInput(io: std.Io, file: std.Io.File, bytes: []const u8) anyerror!void {
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
@@ -63,6 +74,16 @@ pub fn backgroundFetch(io: std.Io, a: std.mem.Allocator, path: []const u8, envir
     // Keep configured helpers, SSH and hooks; fail quietly when credentials
     // are unavailable instead of opening an authentication dialog.
     return gitWithEnvironment(io, a, path, &.{ "-c", "credential.interactive=never", "fetch", "--all", "--prune" }, null, &unattended, 60);
+}
+/// Ask the Git credential helpers already configured on this computer for a
+/// github.com credential. Git Credential Manager opens its own browser sign-in
+/// when it has none stored.
+pub fn credentialFill(io: std.Io, a: std.mem.Allocator, environment: *const std.process.Environ.Map) !Result {
+    var graphical = try environment.clone(a);
+    defer graphical.deinit();
+    // Weaver has no terminal; only a graphical helper may prompt.
+    try graphical.put("GIT_TERMINAL_PROMPT", "0");
+    return runWithEnvironment(io, a, &.{ "git", "credential", "fill" }, null, "protocol=https\nhost=github.com\n\n", &graphical, 600);
 }
 fn gitWithEnvironment(io: std.Io, a: std.mem.Allocator, path: []const u8, args: []const []const u8, input: ?[]const u8, environment: ?*const std.process.Environ.Map, timeout_s: i64) !Result {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -96,6 +117,12 @@ fn gitWithEnvironment(io: std.Io, a: std.mem.Allocator, path: []const u8, args: 
         const option = try std.fmt.allocPrint(a, "credential.helper={s}", .{value});
         try helper_options.append(a, option);
         try argv.appendSlice(a, &.{ "-c", option });
+    }
+    // A signed-in GitHub account also serves SSH-style GitHub remotes, so they
+    // need no SSH key. The repository's configured URL is left unchanged.
+    if (credentials.get(io, a) catch null) |token| {
+        credentials.clear(a, token);
+        try argv.appendSlice(a, &.{ "-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/" });
     }
     try argv.appendSlice(a, &.{ "-C", path });
     try argv.appendSlice(a, args);

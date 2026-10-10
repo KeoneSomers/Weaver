@@ -36,6 +36,7 @@ pub const Menu = enum {
     unstage,
     copy,
     copy_full,
+    edit,
     reveal,
     ignore_file,
     ignore_folder,
@@ -58,6 +59,7 @@ pub const Menu = enum {
             .unstage => "\u{e11f}", // minus
             .copy => "\u{e0a2}", // copy
             .copy_full => "\u{e224}", // clipboard-copy
+            .edit => "\u{e175}", // square-pen
             .reveal => "\u{e246}", // folder-open
             .ignore_file => "\u{e0d1}", // file-x
             .ignore_folder => "\u{e341}", // folder-x
@@ -265,6 +267,7 @@ test "the bundled Lucide font lists its icons by name" {
     try std.testing.expectEqualStrings("\u{e0dc}", find(list, default_project).?.text());
     try std.testing.expectEqualStrings(Menu.remove.glyph(), find(list, "trash-2").?.text());
     try std.testing.expectEqualStrings(Menu.icon.glyph(), find(list, "palette").?.text());
+    try std.testing.expectEqualStrings(Menu.edit.glyph(), find(list, "square-pen").?.text());
     try std.testing.expect(find(list, "not-an-icon") == null);
 }
 
