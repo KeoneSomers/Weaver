@@ -1,0 +1,12 @@
+{
+  "api_version": 1,
+  "id": "example.audit",
+  "name": "Repository Audit",
+  "version": "1.0.0",
+  "publisher": "Weaver examples",
+  "description": "A small Zig extension that reports the current branch and changed files.",
+  "executable": "REPLACE_WITH_ABSOLUTE_PATH_TO_weaver-repository-audit",
+  "permissions": ["repository_read", "process_execution"],
+  "commands": [{"id": "example.audit.run", "title": "Audit this repository"}],
+  "settings": [{"id": "audit.label", "title": "Report label", "default": "Repository health", "description": "A label included with the report."}]
+}

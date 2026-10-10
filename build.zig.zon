@@ -1,0 +1,10 @@
+.{
+    .name = .weaver,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x83506f91aa85b413,
+    .dependencies = .{
+        .knots = .{ .path = "vendor/knots", .lazy = true },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "patches", "vendor/knots", "vendor/nfd" },
+}

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weaver
+Comment=A native workspace for version control
+Exec=weaver %f
+Icon=weaver
+Categories=Development;RevisionControl;
+Terminal=false

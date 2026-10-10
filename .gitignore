@@ -1,0 +1,12 @@
+.zig-cache/
+zig-pkg/
+zig-out/
+.tools/
+vendor/
+dist/
+*.log
+*.pem
+*.p12
+*.pfx
+.env
+src/build_options.zig

@@ -1,0 +1,42 @@
+name: Build and test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev pkg-config git-lfs libsecret-tools
+      - name: Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/bootstrap.ps1 -Zig (Get-Command zig).Source
+      - name: Unix dependencies
+        if: runner.os != 'Windows'
+        run: sh scripts/bootstrap.sh
+      - name: Build and test
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH="$PWD/.tools/git2/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$PWD/.tools/git2/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export PATH="$PWD/.tools/git2/bin:$PATH"
+          zig fmt --check build.zig src
+          zig build test -Doptimize=ReleaseSafe
+          zig build test-ui -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe
+          zig build check -Doptimize=ReleaseSafe
+          zig build extension-example -Doptimize=ReleaseSafe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weaver-${{ matrix.os }}
+          path: zig-out/bin

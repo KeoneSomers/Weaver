@@ -1,0 +1,164 @@
+name: Signed releases
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  package:
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: windows-x86_64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-aarch64
+            arch: aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    env:
+      WEAVER_REPOSITORY: ${{ github.repository }}
+      WEAVER_OAUTH_CLIENT_ID: ${{ vars.WEAVER_OAUTH_CLIENT_ID }}
+      WEAVER_UPDATE_PUBLIC_KEY: ${{ vars.WEAVER_UPDATE_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+      - name: Version and release configuration
+        shell: bash
+        run: |
+          test -n "$WEAVER_OAUTH_CLIENT_ID"
+          test "${#WEAVER_UPDATE_PUBLIC_KEY}" = 64
+          echo "WEAVER_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev pkg-config libfuse2 git-lfs
+      - name: Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/bootstrap.ps1 -Zig (Get-Command zig).Source
+      - name: Unix dependencies
+        if: runner.os != 'Windows'
+        run: sh scripts/bootstrap.sh
+      - name: Verify and build
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH="$PWD/.tools/git2/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export DYLD_LIBRARY_PATH="$PWD/.tools/git2/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export PATH="$PWD/.tools/git2/bin:$PATH"
+          zig build test -Doptimize=ReleaseSafe
+          zig build -Doptimize=ReleaseSafe "-Dversion=$WEAVER_VERSION" "-Doauth-client-id=$WEAVER_OAUTH_CLIENT_ID" "-Drelease-repo=$WEAVER_REPOSITORY" "-Dupdate-public-key=$WEAVER_UPDATE_PUBLIC_KEY"
+          python scripts/collect-licenses.py
+      - uses: azure/login@v2
+        if: runner.os == 'Windows'
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign Windows application and libraries
+        if: runner.os == 'Windows'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: zig-out/bin
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe' "/DAppVersion=$env:WEAVER_VERSION" "/DSourceDir=$pwd/zig-out/bin" packaging/windows/weaver.iss
+          if ($LASTEXITCODE) { throw 'Windows packaging failed' }
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Import Apple signing identity
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/weaver.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/weaver.keychain-db"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/weaver.keychain-db"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$RUNNER_TEMP/weaver.keychain-db"
+          security list-keychains -d user -s "$RUNNER_TEMP/weaver.keychain-db"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/weaver.keychain-db"
+      - name: Package, sign and notarize macOS
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: sh scripts/package-macos.sh "$WEAVER_VERSION" '${{ matrix.arch }}'
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGE_TOOL_SHA256: ${{ vars.APPIMAGE_TOOL_SHA256 }}
+        run: |
+          test "${#APPIMAGE_TOOL_SHA256}" = 64
+          curl --fail --location https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o "$RUNNER_TEMP/appimagetool"
+          echo "$APPIMAGE_TOOL_SHA256  $RUNNER_TEMP/appimagetool" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          export PATH="$RUNNER_TEMP:$PATH"
+          sh scripts/package-linux.sh "$WEAVER_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+          if-no-files-found: error
+  publish:
+    needs: package
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install cryptography==46.0.3
+      - name: Sign update manifest
+        env:
+          WEAVER_UPDATE_PRIVATE_KEY: ${{ secrets.WEAVER_UPDATE_PRIVATE_KEY }}
+          WEAVER_UPDATE_PUBLIC_KEY: ${{ vars.WEAVER_UPDATE_PUBLIC_KEY }}
+        run: python scripts/sign-manifest.py --repo "$GITHUB_REPOSITORY" --version "${GITHUB_REF_NAME#v}"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
