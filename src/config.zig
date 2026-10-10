@@ -26,8 +26,23 @@ pub const DiffFont = enum { mono, sans };
 pub const SettingValue = struct { id: []const u8, value: []const u8 };
 pub const ExtensionState = struct { id: []const u8, manifest_path: []const u8 = "", enabled: bool = true, settings: []SettingValue = &.{} };
 /// `icon` is a Lucide glyph name and `icon_color` a hex color; empty means the default.
-pub const Repository = struct { path: []const u8, provider: []const u8 = "git", last_fetched: ?i64 = null, icon: []const u8 = "", icon_color: []const u8 = "" };
-pub const Data = struct { version: u32 = 1, repositories: []Repository = &.{}, selected: usize = 0, theme: Theme = .graphite, accent: []const u8 = "#B4A0FF", text_size: TextSize = .medium, diff_font: DiffFont = .mono, diff_font_size: u8 = 11, split_diff: bool = false, oauth_client_id: []const u8 = "", release_repo: []const u8 = "", extensions: []ExtensionState = &.{}, auto_refresh: bool = true, auto_fetch: bool = true, auto_update_check: bool = true, github_login: []const u8 = "" };
+/// `name` is an alias shown instead of the folder name, and `group` a `Group.id`, 0 when ungrouped.
+pub const Repository = struct {
+    path: []const u8,
+    provider: []const u8 = "git",
+    last_fetched: ?i64 = null,
+    icon: []const u8 = "",
+    icon_color: []const u8 = "",
+    name: []const u8 = "",
+    group: u32 = 0,
+    pub fn label(self: Repository) []const u8 {
+        return if (self.name.len > 0) self.name else std.fs.path.basename(std.mem.trimEnd(u8, self.path, "/\\"));
+    }
+};
+/// A virtual folder of workspace entries. Groups are listed in display order.
+pub const Group = struct { id: u32, name: []const u8, collapsed: bool = false };
+pub const name_bytes_max = 64;
+pub const Data = struct { version: u32 = 1, repositories: []Repository = &.{}, groups: []Group = &.{}, selected: usize = 0, theme: Theme = .graphite, accent: []const u8 = "#B4A0FF", text_size: TextSize = .medium, diff_font: DiffFont = .mono, diff_font_size: u8 = 11, split_diff: bool = false, oauth_client_id: []const u8 = "", release_repo: []const u8 = "", extensions: []ExtensionState = &.{}, auto_refresh: bool = true, auto_fetch: bool = true, auto_update_check: bool = true, github_login: []const u8 = "" };
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     data: Data,
@@ -62,6 +77,19 @@ pub const Config = struct {
             }
         }
         self.data.repositories = try unique.toOwnedSlice(arena);
+        // A hand-edited file can repeat a group or leave an entry pointing at none.
+        var groups: usize = 0;
+        for (self.data.groups) |group| {
+            var valid = group.id != 0;
+            for (self.data.groups[0..groups]) |kept| valid = valid and kept.id != group.id;
+            if (!valid) continue;
+            self.data.groups[groups] = group;
+            groups += 1;
+        }
+        self.data.groups = self.data.groups[0..groups];
+        for (self.data.repositories) |*repository| if (self.groupIndex(repository.group) == null) {
+            repository.group = 0;
+        };
         self.data.selected = 0;
         for (self.data.repositories, 0..) |repository, i| if (equalPath(repository.path, selected_path)) {
             self.data.selected = i;
@@ -143,10 +171,96 @@ pub const Config = struct {
         if (!std.mem.eql(u8, repository.icon_color, color)) repository.icon_color = try a.dupe(u8, color);
         try self.save(io);
     }
+    /// Sets the name shown for a workspace entry. An empty name restores the folder name.
+    pub fn rename(self: *Config, io: std.Io, index: usize, name: []const u8) !void {
+        if (index >= self.data.repositories.len) return;
+        self.data.repositories[index].name = try self.arena.allocator().dupe(u8, cleanName(name));
+        try self.save(io);
+    }
+    pub fn groupIndex(self: *const Config, id: u32) ?usize {
+        if (id == 0) return null;
+        for (self.data.groups, 0..) |group, i| if (group.id == id) return i;
+        return null;
+    }
+    /// Appends an empty group and returns its id.
+    pub fn addGroup(self: *Config, io: std.Io, name: []const u8) !u32 {
+        const a = self.arena.allocator();
+        var id: u32 = 1;
+        for (self.data.groups) |group| id = @max(id, group.id +| 1);
+        const next = try a.alloc(Group, self.data.groups.len + 1);
+        @memcpy(next[0..self.data.groups.len], self.data.groups);
+        next[next.len - 1] = .{ .id = id, .name = try a.dupe(u8, cleanName(name)) };
+        self.data.groups = next;
+        try self.save(io);
+        return id;
+    }
+    pub fn renameGroup(self: *Config, io: std.Io, id: u32, name: []const u8) !void {
+        const index = self.groupIndex(id) orelse return;
+        self.data.groups[index].name = try self.arena.allocator().dupe(u8, cleanName(name));
+        try self.save(io);
+    }
+    /// Deletes a group; its entries stay in the workspace, ungrouped.
+    pub fn removeGroup(self: *Config, io: std.Io, id: u32) !void {
+        const index = self.groupIndex(id) orelse return;
+        const groups = self.data.groups;
+        std.mem.copyForwards(Group, groups[index .. groups.len - 1], groups[index + 1 ..]);
+        self.data.groups = groups[0 .. groups.len - 1];
+        for (self.data.repositories) |*repository| if (repository.group == id) {
+            repository.group = 0;
+        };
+        try self.save(io);
+    }
+    pub fn moveGroup(self: *Config, io: std.Io, from: usize, to: usize) !void {
+        const items = self.data.groups;
+        if (from >= items.len or to >= items.len or from == to) return;
+        const moved = items[from];
+        if (from < to) std.mem.copyForwards(Group, items[from..to], items[from + 1 .. to + 1]) else std.mem.copyBackwards(Group, items[to + 1 .. from + 1], items[to..from]);
+        items[to] = moved;
+        try self.save(io);
+    }
+    /// Places a workspace entry in a group, or outside every group with id 0.
+    pub fn setGroup(self: *Config, io: std.Io, index: usize, id: u32) !void {
+        if (index >= self.data.repositories.len or (id != 0 and self.groupIndex(id) == null)) return;
+        self.data.repositories[index].group = id;
+        try self.save(io);
+    }
+    /// Puts a workspace entry in a group (0 for none), in front of the entry at
+    /// `before` or after the group's other entries.
+    pub fn place(self: *Config, io: std.Io, index: usize, id: u32, before: ?usize) !void {
+        const items = self.data.repositories;
+        if (index >= items.len or (id != 0 and self.groupIndex(id) == null)) return;
+        if (before) |next| if (next >= items.len or next == index) return;
+        items[index].group = id;
+        var to = index;
+        if (before) |next| {
+            to = if (index < next) next - 1 else next;
+        } else {
+            var last: ?usize = null;
+            for (items, 0..) |other, i| if (i != index and other.group == id) {
+                last = i;
+            };
+            if (last) |end| to = if (index < end) end else end + 1;
+        }
+        // `move` saves unless the entry already sits there.
+        if (to == index) try self.save(io) else try self.move(io, index, to);
+    }
+    pub fn setCollapsed(self: *Config, io: std.Io, id: u32, collapsed: bool) !void {
+        const index = self.groupIndex(id) orelse return;
+        self.data.groups[index].collapsed = collapsed;
+        try self.save(io);
+    }
     pub fn deinit(self: *Config) void {
         self.arena.deinit();
     }
 };
+/// Trims a typed name and cuts it to `name_bytes_max` on a character boundary.
+fn cleanName(name: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, name, " \t\r\n");
+    if (trimmed.len <= name_bytes_max) return trimmed;
+    var end: usize = name_bytes_max;
+    while (end > 0 and (trimmed[end] & 0xC0) == 0x80) end -= 1;
+    return std.mem.trimEnd(u8, trimmed[0..end], " \t\r\n");
+}
 fn absolutePath(io: std.Io, a: std.mem.Allocator, path: []const u8) ![]const u8 {
     if (path.len == 0) return error.EmptyRepositoryPath;
     if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(a, &.{path});
@@ -328,4 +442,128 @@ test "a project icon persists and follows its repository through moves and remov
     }
     try restored.setIcon(io, 1, "", "");
     try std.testing.expectEqualStrings("", restored.data.repositories[1].icon);
+}
+
+test "aliases and groups persist and follow their repositories" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("WEAVER_CONFIG_HOME", root);
+    {
+        var config = try Config.init(io, std.testing.allocator, &env);
+        defer config.deinit();
+        for ([_][]const u8{ "a", "b", "c", "d" }) |name| try config.add(io, try std.fs.path.join(config.arena.allocator(), &.{ root, name }));
+        try std.testing.expectEqualStrings("b", config.data.repositories[1].label());
+        try config.rename(io, 1, "  Backend  ");
+        try config.rename(io, 9, "ignored"); // out of range
+        try std.testing.expectEqualStrings("Backend", config.data.repositories[1].label());
+        const work = try config.addGroup(io, "Work");
+        const play = try config.addGroup(io, "Play");
+        const spare = try config.addGroup(io, "Spare");
+        try config.setGroup(io, 1, work);
+        try config.setGroup(io, 2, work);
+        try config.setGroup(io, 3, spare);
+        try config.setGroup(io, 0, 99); // no such group
+        try std.testing.expectEqual(@as(u32, 0), config.data.repositories[0].group);
+        try config.renameGroup(io, play, "Side projects");
+        try config.setCollapsed(io, work, true);
+        try config.moveGroup(io, 0, 2);
+        try config.moveGroup(io, 0, 3); // out of range
+        try config.removeGroup(io, spare);
+        try config.move(io, 1, 3);
+        try config.remove(io, 0);
+    }
+    var restored = try Config.init(io, std.testing.allocator, &env);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 2), restored.data.groups.len);
+    try std.testing.expectEqualStrings("Side projects", restored.data.groups[0].name);
+    try std.testing.expectEqualStrings("Work", restored.data.groups[1].name);
+    try std.testing.expect(restored.data.groups[1].collapsed and !restored.data.groups[0].collapsed);
+    const work = restored.data.groups[1].id;
+    for (restored.data.repositories, "cdb") |repository, name| {
+        try std.testing.expectEqual(name, repository.path[repository.path.len - 1]);
+        try std.testing.expectEqual(if (name == 'd') @as(u32, 0) else work, repository.group);
+        try std.testing.expectEqualStrings(if (name == 'b') "Backend" else &.{name}, repository.label());
+    }
+    try restored.rename(io, 2, "");
+    try std.testing.expectEqualStrings("b", restored.data.repositories[2].label());
+    // A name is cut on a character boundary, not through one.
+    var long: [name_bytes_max + 2]u8 = @splat('x');
+    @memcpy(long[name_bytes_max - 1 ..][0..2], "\u{e9}");
+    try restored.rename(io, 2, &long);
+    try std.testing.expectEqual(@as(usize, name_bytes_max - 1), restored.data.repositories[2].name.len);
+}
+
+test "a settings file with broken groups loads with entries ungrouped" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    try env.put("WEAVER_CONFIG_HOME", root);
+    const one = try std.fs.path.join(a, &.{ root, "one" });
+    defer a.free(one);
+    const two = try std.fs.path.join(a, &.{ root, "two" });
+    defer a.free(two);
+    const text = try std.json.Stringify.valueAlloc(a, .{
+        .groups = .{ .{ .id = 0, .name = "Zero" }, .{ .id = 4, .name = "Kept" }, .{ .id = 4, .name = "Repeat" } },
+        .repositories = .{ .{ .path = one, .group = 4 }, .{ .path = two, .group = 7 } },
+    }, .{});
+    defer a.free(text);
+    try temp.dir.createDirPath(io, "Weaver");
+    try temp.dir.writeFile(io, .{ .sub_path = "Weaver/settings.json", .data = text });
+    var config = try Config.init(io, a, &env);
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 1), config.data.groups.len);
+    try std.testing.expectEqualStrings("Kept", config.data.groups[0].name);
+    try std.testing.expectEqual(@as(u32, 4), config.data.repositories[0].group);
+    try std.testing.expectEqual(@as(u32, 0), config.data.repositories[1].group);
+}
+
+test "placing an entry sets its group and its position among that group's entries" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("WEAVER_CONFIG_HOME", root);
+    const expectOrder = struct {
+        fn check(c: *const Config, comptime order: []const u8, comptime grouped: []const u8) !void {
+            for (c.data.repositories, order) |repository, name| {
+                try std.testing.expectEqual(name, repository.path[repository.path.len - 1]);
+                try std.testing.expectEqual(std.mem.indexOfScalar(u8, grouped, name) != null, repository.group != 0);
+            }
+            try std.testing.expectEqual(@as(u8, 'd'), c.data.repositories[c.data.selected].path[c.data.repositories[c.data.selected].path.len - 1]);
+        }
+    }.check;
+    {
+        var config = try Config.init(io, std.testing.allocator, &env);
+        defer config.deinit();
+        for ([_][]const u8{ "a", "b", "c", "d" }) |name| try config.add(io, try std.fs.path.join(config.arena.allocator(), &.{ root, name }));
+        const work = try config.addGroup(io, "Work");
+        try config.place(io, 0, work, null); // first entry of the group stays put
+        try expectOrder(&config, "abcd", "a");
+        try config.place(io, 2, work, 0);
+        try expectOrder(&config, "cabd", "ca");
+        try config.place(io, 3, work, null);
+        try expectOrder(&config, "cadb", "cad");
+        try config.place(io, 0, 0, null); // out of the group, after the ungrouped entries
+        try expectOrder(&config, "adbc", "ad");
+        try config.place(io, 1, 9, null); // no such group
+        try config.place(io, 1, 0, 1); // in front of itself
+        try config.place(io, 1, 0, 7); // out of range
+        try expectOrder(&config, "adbc", "ad");
+    }
+    var restored = try Config.init(io, std.testing.allocator, &env);
+    defer restored.deinit();
+    try expectOrder(&restored, "adbc", "ad");
 }

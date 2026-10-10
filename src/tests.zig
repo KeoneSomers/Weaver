@@ -15,4 +15,5 @@ test {
     _ = @import("repository_links.zig");
     _ = @import("ignore.zig");
     _ = @import("icons.zig");
+    _ = @import("sidebar_drag.zig");
 }

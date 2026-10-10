@@ -46,6 +46,10 @@ pub const Menu = enum {
     refresh,
     open_remote,
     icon,
+    rename,
+    new_group,
+    to_group,
+    ungroup,
     move_up,
     move_down,
     move_top,
@@ -69,6 +73,10 @@ pub const Menu = enum {
             .refresh => "\u{e148}", // refresh-cw
             .open_remote => "\u{e0bd}", // external-link
             .icon => "\u{e1dc}", // palette
+            .rename => "\u{e1f8}", // pencil
+            .new_group => "\u{e0de}", // folder-plus
+            .to_group => "\u{e337}", // folder-input
+            .ungroup => "\u{e33a}", // folder-output
             .move_up => "\u{e04e}", // arrow-up
             .move_down => "\u{e046}", // arrow-down
             .move_top => "\u{e45f}", // arrow-up-to-line
@@ -144,6 +152,10 @@ pub const Glyph = struct {
         return self.bytes[0..self.len];
     }
 };
+
+/// Disclosure glyphs of a sidebar group, from the Lucide font.
+pub const group_open = "\u{e071}"; // chevron-down
+pub const group_closed = "\u{e073}"; // chevron-right
 
 /// Shown for a project without a chosen icon, or whose icon the font no longer has.
 pub const default_project = "folder";
@@ -268,6 +280,9 @@ test "the bundled Lucide font lists its icons by name" {
     try std.testing.expectEqualStrings(Menu.remove.glyph(), find(list, "trash-2").?.text());
     try std.testing.expectEqualStrings(Menu.icon.glyph(), find(list, "palette").?.text());
     try std.testing.expectEqualStrings(Menu.edit.glyph(), find(list, "square-pen").?.text());
+    inline for (.{ .{ Menu.rename, "pencil" }, .{ Menu.new_group, "folder-plus" }, .{ Menu.to_group, "folder-input" }, .{ Menu.ungroup, "folder-output" } }) |entry|
+        try std.testing.expectEqualStrings(entry[0].glyph(), find(list, entry[1]).?.text());
+    inline for (.{ .{ group_open, "chevron-down" }, .{ group_closed, "chevron-right" } }) |entry| try std.testing.expectEqualStrings(entry[0], find(list, entry[1]).?.text());
     try std.testing.expect(find(list, "not-an-icon") == null);
 }
 

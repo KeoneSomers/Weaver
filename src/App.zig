@@ -23,6 +23,7 @@ const remote_sync = @import("remote_sync.zig");
 const guidance = @import("guidance.zig");
 const ignore = @import("ignore.zig");
 const editor = @import("editor.zig");
+const sidebar_drag = @import("sidebar_drag.zig");
 const options = @import("options");
 const Self = @This();
 const Rect = ui.component.Rect;
@@ -31,6 +32,10 @@ const Button = ui.component.Button;
 const TextInput = ui.component.TextInput;
 const file_row_height: f32 = 30;
 const nav_height: f32 = 32;
+const row_gap: f32 = 2;
+/// Distance between the tops of neighbouring sidebar rows.
+const row_pitch: f32 = nav_height + row_gap;
+const root_padding: f32 = 12;
 const menu_row_height: f32 = 30;
 const icon_cell: f32 = 38;
 const icon_columns = 13;
@@ -52,6 +57,41 @@ const tool_operations = blk: {
     };
     break :blk values;
 };
+/// A change to the sidebar's order or grouping, by workspace index or group id.
+const SidebarEdit = union(enum) {
+    move: [2]usize,
+    move_group: [2]usize,
+    assign: struct { index: usize, group: u32 },
+    delete_group: u32,
+    toggle_group: u32,
+};
+const DragPress = struct {
+    item: sidebar_drag.Item,
+    /// Pointer position inside the row.
+    grab: [2]f32,
+    width: f32,
+};
+/// A sidebar row carried by the pointer, then gliding to where it was dropped.
+const Drag = struct {
+    item: sidebar_drag.Item,
+    grab: [2]f32,
+    origin: sidebar_drag.Drop,
+    drop: sidebar_drag.Drop,
+    /// Top-left of the lifted row in the window.
+    pos: [2]f32,
+    width: f32,
+    released: bool = false,
+    /// 0 to 1 as the row rises off the list.
+    lift: f32 = 0,
+    /// 0 to 1 as the row moves in under a group.
+    indent: f32,
+    /// Height of the strip under the groups that takes an entry out of its group.
+    strip: f32,
+    /// Height held open at each slot between the remaining rows.
+    gaps: []f32,
+};
+/// What the name dialog edits. A new group can take a workspace entry with it.
+const NameTarget = union(enum) { repository: usize, group: u32, new_group: ?usize };
 const JobKind = enum { git, open_local, counts, preview, revision, auth_begin, auth_poll, sign_out, update_check, update_download, extension, github_repos };
 const Job = struct {
     environment: ?*const std.process.Environ.Map = null,
@@ -171,7 +211,15 @@ icon_hover: ?[]const u8 = null,
 icon_filter: std.ArrayList(u8) = .empty,
 active_context: ?ui.Key = null,
 /// Applied after the repository rows are built, so no row is rendered twice.
-pending_move: ?[2]usize = null,
+pending_edit: ?SidebarEdit = null,
+/// The row under a held press; it is lifted once the pointer travels.
+drag_press: ?DragPress = null,
+drag: ?Drag = null,
+name_open: bool = false,
+name_target: NameTarget = .{ .new_group = null },
+name_input: std.ArrayList(u8) = .empty,
+/// Put the caret in the name field on the dialog's first frame.
+name_focus: bool = false,
 pending_request: ?model.Request = null,
 pending_extension: ?struct { manifest: plugins.Manifest, command: plugins.Command, settings: []const config_mod.SettingValue } = null,
 path_input: std.ArrayList(u8) = .empty,
@@ -248,8 +296,9 @@ pub fn deinit(self: *Self) void {
     self.a.free(self.cached_filter);
     self.a.free(self.loading_path);
     self.a.free(self.lucide);
+    self.endDrag();
     self.clearDiffRows();
-    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter" }) |field| @field(self, field).deinit(self.a);
+    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter", "name_input" }) |field| @field(self, field).deinit(self.a);
     if (self.notice_owned) self.a.free(self.notice);
     self.a.free(self.failure_text);
     self.registry.deinit();
@@ -810,6 +859,7 @@ fn removeRepository(self: *Self, index: usize) !void {
     if (!self.available() or index >= self.config.data.repositories.len) return;
     const selected = index == self.config.data.selected;
     self.icon_open = false;
+    self.name_open = false;
     try self.config.remove(self.io, index);
     if (selected) {
         // Discard in-flight scans too, including when removing the last entry.
@@ -907,14 +957,56 @@ const ProjectActions = struct {
         };
         if (try app.menuAction(ctx, "copy-project-path", .copy, "Copy repository path", true, false)) try ctx.writeClipboard(repository.path);
         if (try app.menuAction(ctx, "change-icon", .icon, "Change icon…", true, false)) app.openIconPicker(self.index);
+        if (try app.menuAction(ctx, "rename-project", .rename, "Rename…", true, false)) try app.openNameDialog(.{ .repository = self.index });
+        try menuSeparator(ctx, "group-group");
+        for (app.config.data.groups) |group| {
+            if (group.id == repository.group) continue;
+            const title = try std.fmt.allocPrint(ctx.arena(), "Move to {s}", .{try shortName(ctx.arena(), group.name)});
+            if (try app.menuAction(ctx, try std.fmt.allocPrint(ctx.arena(), "to-group-{d}", .{group.id}), .to_group, title, true, false)) app.pending_edit = .{ .assign = .{ .index = self.index, .group = group.id } };
+        }
+        if (try app.menuAction(ctx, "to-new-group", .new_group, "Move to new group…", true, false)) try app.openNameDialog(.{ .new_group = self.index });
+        if (repository.group != 0) {
+            if (try app.menuAction(ctx, "ungroup", .ungroup, "Remove from group", true, false)) app.pending_edit = .{ .assign = .{ .index = self.index, .group = 0 } };
+        }
         try menuSeparator(ctx, "move-group");
-        const last = app.config.data.repositories.len - 1;
-        if (try app.menuAction(ctx, "move-up", .move_up, "Move up", self.index > 0, false)) app.pending_move = .{ self.index, self.index - 1 };
-        if (try app.menuAction(ctx, "move-down", .move_down, "Move down", self.index < last, false)) app.pending_move = .{ self.index, self.index + 1 };
-        if (try app.menuAction(ctx, "move-top", .move_top, "Move to top", self.index > 0, false)) app.pending_move = .{ self.index, 0 };
-        if (try app.menuAction(ctx, "move-bottom", .move_bottom, "Move to bottom", self.index < last, false)) app.pending_move = .{ self.index, last };
+        // An entry moves among the entries listed with it: its group, or the ungrouped ones.
+        var first = self.index;
+        var last = self.index;
+        var previous: ?usize = null;
+        var next: ?usize = null;
+        for (app.config.data.repositories, 0..) |other, i| {
+            if (other.group != repository.group) continue;
+            first = @min(first, i);
+            last = @max(last, i);
+            if (i < self.index) previous = i;
+            if (i > self.index and next == null) next = i;
+        }
+        if (try app.menuAction(ctx, "move-up", .move_up, "Move up", previous != null, false)) app.pending_edit = .{ .move = .{ self.index, previous.? } };
+        if (try app.menuAction(ctx, "move-down", .move_down, "Move down", next != null, false)) app.pending_edit = .{ .move = .{ self.index, next.? } };
+        if (try app.menuAction(ctx, "move-top", .move_top, "Move to top", previous != null, false)) app.pending_edit = .{ .move = .{ self.index, first } };
+        if (try app.menuAction(ctx, "move-bottom", .move_bottom, "Move to bottom", next != null, false)) app.pending_edit = .{ .move = .{ self.index, last } };
         try menuSeparator(ctx, "remove-group");
         if (try app.menuAction(ctx, "remove-project", .remove, "Remove from workspace", ready, true)) try app.removeRepository(self.index);
+    }
+};
+
+const GroupActions = struct {
+    app: *Self,
+    id: u32,
+
+    pub fn render(self: *const GroupActions, ctx: *ui.Frame) anyerror!void {
+        const app = self.app;
+        const index = app.config.groupIndex(self.id) orelse return;
+        const last = app.config.data.groups.len - 1;
+        if (try app.menuAction(ctx, "rename-group", .rename, "Rename…", true, false)) try app.openNameDialog(.{ .group = self.id });
+        if (try app.menuAction(ctx, "new-group", .new_group, "New group…", true, false)) try app.openNameDialog(.{ .new_group = null });
+        try menuSeparator(ctx, "move-group");
+        if (try app.menuAction(ctx, "move-up", .move_up, "Move up", index > 0, false)) app.pending_edit = .{ .move_group = .{ index, index - 1 } };
+        if (try app.menuAction(ctx, "move-down", .move_down, "Move down", index < last, false)) app.pending_edit = .{ .move_group = .{ index, index + 1 } };
+        if (try app.menuAction(ctx, "move-top", .move_top, "Move to top", index > 0, false)) app.pending_edit = .{ .move_group = .{ index, 0 } };
+        if (try app.menuAction(ctx, "move-bottom", .move_bottom, "Move to bottom", index < last, false)) app.pending_edit = .{ .move_group = .{ index, last } };
+        try menuSeparator(ctx, "remove-group");
+        if (try app.menuAction(ctx, "delete-group", .remove, "Delete group", true, true)) app.pending_edit = .{ .delete_group = self.id };
     }
 };
 
@@ -1020,7 +1112,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
         ctx.requestRedraw();
     }
     const extent = ctx.input().logical_extent;
-    const root = Rect{ .key = .str("root"), .style = &.{ .width = .fixed(@floatFromInt(extent.width)), .height = .fixed(@floatFromInt(extent.height)), .direction = .column, .background = .bg, .font_size = .sm, .padding = .all(12), .gap = 8 } };
+    const root = Rect{ .key = .str("root"), .style = &.{ .width = .fixed(@floatFromInt(extent.width)), .height = .fixed(@floatFromInt(extent.height)), .direction = .column, .background = .bg, .font_size = .sm, .padding = .all(root_padding), .gap = 8 } };
     _ = try root.open(ctx);
     const body = Rect{ .key = .str("body"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row, .gap = 10 } };
     _ = try body.open(ctx);
@@ -1053,6 +1145,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     try ctx.e(Text{ .key = .str("notice"), .content = try diff.safeText(ctx.arena(), notice_line), .style = &.{ .width = .grow(), .wrap = false, .overflow = .hidden, .foreground = if (self.notice_error) .@"error" else .dimmed, .font_size = .xs } });
     try label(ctx, "version", "Weaver " ++ options.version, .dimmed);
     try status.close(ctx);
+    try self.dragGhost(ctx);
     try root.close(ctx);
     try self.dialogs(ctx);
     if (self.available()) {
@@ -1124,22 +1217,86 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     }
     try space(ctx, "repo-gap", 10);
     try sectionLabel(ctx, "repos-label", "Repositories");
-    const repos = Rect{ .key = .str("repositories"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .gap = 2, .overflow = .scroll_y } };
+    const repos = Rect{ .key = .str("repositories"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .overflow = .scroll_y } };
     _ = try repos.open(ctx);
-    for (self.config.data.repositories, 0..) |repository, i| {
-        const p = repository.path;
-        const menu = ui.component.ContextMenu(ProjectActions){ .key = ui.Key.str("project-context").indexed(ui.Key.str(p).hash()), .menu = .{ .app = self, .index = i }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
-        try self.openContextMenu(ctx, &menu);
-        if (try self.repositoryRow(ctx, i, repository)) try self.selectRepository(i);
-        const old_count = self.config.data.repositories.len;
-        try menu.close(ctx);
-        // Removal changes the workspace list; rebuild it on the next frame.
-        if (self.config.data.repositories.len != old_count) break;
+    // The scrolled column: its box places the rows a drag lands between.
+    const list = Rect{ .key = .str("repository-rows"), .style = comptime &.{ .width = .grow(), .direction = .column, .gap = row_gap } };
+    _ = try list.open(ctx);
+    const view = (try ctx.ui().state.getOrCreate(.measured, ctx.ui().allocator, repos.key.hash())).box;
+    const base = (try ctx.ui().state.getOrCreate(.measured, ctx.ui().allocator, list.key.hash())).box;
+    // Groups come first, each followed by its entries, then the ungrouped entries.
+    var rows = try sidebar_drag.entries(ctx.arena(), &self.config.data, if (self.drag) |drag| drag.item else null);
+    if (self.drag) |drag| {
+        const exists = switch (drag.item) {
+            .repository => |index| index < self.config.data.repositories.len,
+            .group => |id| self.config.groupIndex(id) != null,
+        };
+        // The list changed under the drag; put everything back.
+        if (!exists or rows.len + 1 != drag.gaps.len) {
+            self.endDrag();
+            rows = try sidebar_drag.entries(ctx.arena(), &self.config.data, null);
+        }
     }
+    const landed = if (self.drag) |*drag| self.moveDrag(ctx, drag, rows, .{ view.x(), view.y(), view.w(), view.h() }, .{ base.x(), base.y() }) else false;
+    const pointer = ctx.ui().input.mouse_pos;
+    const strip_at = sidebar_drag.groupedRows(&self.config.data, rows);
+    for (rows, 0..) |entry, row_index| {
+        if (self.drag) |*drag| {
+            try dragGap(ctx, drag, row_index);
+            if (row_index == strip_at) try self.dragStrip(ctx, drag);
+        }
+        // Where a press on this row would hold it while it is dragged.
+        const grab = [2]f32{ @as(f32, @floatCast(pointer[0])) - base.x(), @as(f32, @floatCast(pointer[1])) - base.y() - row_pitch * @as(f32, @floatFromInt(row_index)) };
+        switch (entry) {
+            .group => |group| {
+                const menu = ui.component.ContextMenu(GroupActions){ .key = ui.Key.str("group-context").indexed(group.id), .menu = .{ .app = self, .id = group.id }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
+                try self.openContextMenu(ctx, &menu);
+                if (self.pressedRow(ctx, menu.key)) self.drag_press = .{ .item = .{ .group = group.id }, .grab = grab, .width = base.w() };
+                if (try groupRow(ctx, group)) self.pending_edit = .{ .toggle_group = group.id };
+                try menu.close(ctx);
+            },
+            .repository => |i| {
+                const repository = self.config.data.repositories[i];
+                const menu = ui.component.ContextMenu(ProjectActions){ .key = ui.Key.str("project-context").indexed(ui.Key.str(repository.path).hash()), .menu = .{ .app = self, .index = i }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
+                try self.openContextMenu(ctx, &menu);
+                if (self.pressedRow(ctx, menu.key)) self.drag_press = .{ .item = .{ .repository = i }, .grab = grab, .width = base.w() };
+                if (try self.repositoryRow(ctx, i, repository)) try self.selectRepository(i);
+                const old_count = self.config.data.repositories.len;
+                try menu.close(ctx);
+                // Removal changes the workspace list; rebuild it on the next frame.
+                if (self.config.data.repositories.len != old_count) break;
+            },
+        }
+    }
+    if (self.drag) |*drag| {
+        try dragGap(ctx, drag, rows.len);
+        if (rows.len == strip_at) try self.dragStrip(ctx, drag);
+    }
+    try list.close(ctx);
     try repos.close(ctx);
-    if (self.pending_move) |move| {
-        self.pending_move = null;
-        try self.config.move(self.io, move[0], move[1]);
+    if (landed) {
+        try self.dropDrag();
+        ctx.requestRedraw();
+    } else if (self.drag == null) if (self.drag_press) |press| {
+        // A press becomes a drag once the pointer has travelled.
+        if (!ctx.ui().input.mouseButton(.left).down) self.drag_press = null else if (ctx.ui().state.press_drag) try self.liftDrag(ctx, press);
+    };
+    if (self.pending_edit) |edit| {
+        self.pending_edit = null;
+        switch (edit) {
+            .move => |move| try self.config.move(self.io, move[0], move[1]),
+            .move_group => |move| try self.config.moveGroup(self.io, move[0], move[1]),
+            .assign => |assign| {
+                try self.config.setGroup(self.io, assign.index, assign.group);
+                // Keep the moved entry in view.
+                try self.config.setCollapsed(self.io, assign.group, false);
+            },
+            .delete_group => |id| {
+                try self.config.removeGroup(self.io, id);
+                self.message("Group deleted. Its repositories stay in the workspace.", false);
+            },
+            .toggle_group => |id| if (self.config.groupIndex(id)) |index| try self.config.setCollapsed(self.io, id, !self.config.data.groups[index].collapsed),
+        }
         ctx.requestRedraw();
     }
     if (try navKey(ctx, .str("add-repo"), "\u{e145}  Add repository", false, self.available())) {
@@ -1147,6 +1304,7 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
         try self.browse(.folder, &self.path_input, false, "Choose a repository folder");
         ctx.requestRedraw();
     }
+    if (try navKey(ctx, .str("add-group"), "\u{e2cc}  New group", false, true)) try self.openNameDialog(.{ .new_group = null });
     try ctx.e(Rect{ .key = .str("sidebar-divider"), .style = comptime &.{ .width = .grow(), .height = .fixed(9), .border_width = .edges(0, 0, 1, 0), .border_color = .muted } });
     try space(ctx, "sidebar-divider-gap", 6);
     if (self.registry.enabled("weaver.github")) {
@@ -1156,11 +1314,141 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     if (try nav(ctx, "\u{e8b8}  Settings", self.page == .settings, true)) self.page = .settings;
     try panel.close(ctx);
 }
+/// Whether this frame's press landed on a sidebar row rather than on its open menu.
+fn pressedRow(self: *Self, ctx: *ui.Frame, menu: ui.Key) bool {
+    return self.drag == null and ctx.ui().leftPressed(menu.hash(), .within) and !ctx.ui().isHoveredWithin(menu.indexed(1).hash());
+}
+/// Lifts a pressed row out of the list. The space it leaves starts fully open.
+fn liftDrag(self: *Self, ctx: *ui.Frame, press: DragPress) !void {
+    const data = &self.config.data;
+    const rows = try sidebar_drag.entries(ctx.arena(), data, press.item);
+    const home = sidebar_drag.origin(data, rows, press.item);
+    const gaps = try self.a.alloc(f32, rows.len + 1);
+    @memset(gaps, 0);
+    // An entry already under the groups rests where the strip appears.
+    if (!home.strip) gaps[home.slot] = row_pitch * @as(f32, @floatFromInt(sidebar_drag.span(data, press.item)));
+    const pointer = ctx.ui().input.mouse_pos;
+    self.drag = .{ .item = press.item, .grab = press.grab, .origin = home, .drop = home, .pos = .{ @as(f32, @floatCast(pointer[0])) - press.grab[0], @as(f32, @floatCast(pointer[1])) - press.grab[1] }, .width = press.width, .indent = if (home.indent) 1 else 0, .strip = if (home.strip) row_pitch else 0, .gaps = gaps };
+    self.drag_press = null;
+    ctx.requestRedraw();
+}
+fn endDrag(self: *Self) void {
+    if (self.drag) |drag| self.a.free(drag.gaps);
+    self.drag = null;
+}
+/// Advances the drag by a frame: the lifted row follows the pointer, the gap
+/// follows the row, and a released row glides to its gap. True once it is there.
+fn moveDrag(self: *Self, ctx: *ui.Frame, drag: *Drag, rows: []const sidebar_drag.Entry, view: [4]f32, base: [2]f32) bool {
+    const input = &ctx.ui().input;
+    const pointer = [2]f32{ @floatCast(input.mouse_pos[0]), @floatCast(input.mouse_pos[1]) };
+    const elapsed_ms = @as(f32, @floatFromInt(@min(ctx.input().delta_ns, 50 * std.time.ns_per_ms))) / std.time.ns_per_ms;
+    const step = 1 - @exp(-elapsed_ms / 28);
+    if (!drag.released) {
+        drag.pos = .{ pointer[0] - drag.grab[0], pointer[1] - drag.grab[1] };
+        // Away from the list the row goes back where it came from.
+        const reach = 28;
+        const over = pointer[0] >= view[0] - reach and pointer[0] <= view[0] + view[2] + reach and pointer[1] >= view[1] - reach and pointer[1] <= view[1] + view[3] + reach;
+        const cancelled = input.keyPressed(.escape) or input.focus_lost or input.pointer_cancelled;
+        drag.drop = if (over and !cancelled) sidebar_drag.target(&self.config.data, rows, drag.item, (drag.pos[1] + nav_height / 2 - base[1]) / row_pitch, drag.strip / row_pitch) else drag.origin;
+        if (cancelled or !input.mouseButton(.left).down) drag.released = true;
+    }
+    var settled = drag.released;
+    if (drag.released) {
+        // Ungrouped rows sit below the strip for as long as it is shown.
+        const below_strip = drag.item == .repository and !drag.drop.indent and !drag.drop.strip;
+        const place = [2]f32{ base[0], base[1] + row_pitch * @as(f32, @floatFromInt(drag.drop.slot)) + if (below_strip) drag.strip else 0 };
+        for (&drag.pos, place) |*at, goal| {
+            at.* += (goal - at.*) * step;
+            if (@abs(goal - at.*) > 0.75) settled = false;
+        }
+    }
+    drag.lift += ((if (drag.released) @as(f32, 0) else 1) - drag.lift) * step;
+    drag.indent += ((if (drag.drop.indent) @as(f32, 1) else 0) - drag.indent) * step;
+    // A released group makes room for its entries before they reappear.
+    const open: f32 = if (drag.released) @floatFromInt(sidebar_drag.span(&self.config.data, drag.item)) else 1;
+    for (drag.gaps, 0..) |*gap, slot| {
+        const goal = if (slot == drag.drop.slot and !drag.drop.strip) open * row_pitch else 0;
+        gap.* += (goal - gap.*) * step;
+        if (@abs(goal - gap.*) > 0.75) settled = false;
+    }
+    // The strip shows for a carried entry and stays for one dropped on it.
+    const shown = drag.item == .repository and self.config.data.groups.len > 0 and (!drag.released or drag.drop.strip);
+    const strip_goal: f32 = if (shown) row_pitch else 0;
+    drag.strip += (strip_goal - drag.strip) * step;
+    if (@abs(strip_goal - drag.strip) > 0.75) settled = false;
+    ctx.requestRedraw();
+    return settled;
+}
+/// Applies a finished drag to the workspace.
+fn dropDrag(self: *Self) !void {
+    const drag = self.drag.?;
+    defer self.endDrag();
+    if (drag.drop.same(drag.origin)) return;
+    switch (drag.drop.place) {
+        .repository => |place| {
+            try self.config.place(self.io, drag.item.repository, place.group, place.before);
+            // Show the entry where it was dropped.
+            if (self.config.groupIndex(place.group)) |index| if (self.config.data.groups[index].collapsed) try self.config.setCollapsed(self.io, place.group, false);
+        },
+        .group => |to| try self.config.moveGroup(self.io, self.config.groupIndex(drag.item.group).?, to),
+    }
+}
+/// The space held open at a slot, outlined where the lifted row would land.
+fn dragGap(ctx: *ui.Frame, drag: *const Drag, slot: usize) !void {
+    // The list's own spacing follows every element.
+    const height = drag.gaps[slot] - row_gap;
+    if (height < 1) return;
+    const key = ui.Key.str("drag-gap").indexed(slot);
+    const space_rect = Rect{ .key = key, .style = &.{ .width = .grow(), .height = .fixed(height), .padding = .init(0, 0, 0, 14 * drag.indent), .overflow = .hidden } };
+    _ = try space_rect.open(ctx);
+    if (slot == drag.drop.slot) try ctx.e(Rect{ .key = key.indexed(1), .style = &.{ .width = .grow(), .height = .fixed(@min(height, nav_height)), .radius = .md, .background = themes.selection(ctx.ui().theme), .border_width = .all(1), .border_color = .accent, .opacity = 0.55 } });
+    try space_rect.close(ctx);
+}
+/// The strip under the groups: an entry dropped on it leaves its group.
+fn dragStrip(self: *Self, ctx: *ui.Frame, drag: *const Drag) !void {
+    const height = drag.strip - row_gap;
+    if (height < 1) return;
+    const key = ui.Key.str("drag-strip");
+    const space_rect = Rect{ .key = key, .style = &.{ .width = .grow(), .height = .fixed(height), .overflow = .hidden } };
+    _ = try space_rect.open(ctx);
+    const on = drag.drop.strip;
+    const outline = Rect{ .key = key.indexed(1), .style = &.{ .width = .grow(), .height = .fixed(@min(height, nav_height)), .justify = .center, .@"align" = .center, .radius = .md, .background = if (on) themes.selection(ctx.ui().theme) else .transparent, .border_width = .all(1), .border_color = if (on) .accent else .toned } };
+    _ = try outline.open(ctx);
+    const grouped = drag.item == .repository and self.config.data.repositories[drag.item.repository].group != 0;
+    try ctx.e(Text{ .key = key.indexed(2), .content = if (grouped) "Drop here to ungroup" else "Ungrouped", .selectable = false, .style = &.{ .wrap = false, .font_size = .xs, .foreground = .dimmed } });
+    try outline.close(ctx);
+    try space_rect.close(ctx);
+}
+/// The lifted row, drawn over the window at the pointer.
+fn dragGhost(self: *Self, ctx: *ui.Frame) !void {
+    const drag = self.drag orelse return;
+    const key = ui.Key.str("drag-ghost");
+    const group = drag.item == .group;
+    const line = Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ drag.pos[0] - root_padding + 4 * drag.lift, drag.pos[1] - root_padding - 2 * drag.lift }, .width = .fixed(drag.width), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .gap = if (group) 6 else 0, .padding = .init(0, 8, 0, if (group) 10 else 4 + 14 * drag.indent), .radius = .md, .background = .toned, .border_width = .all(1), .border_color = .accent, .foreground = .text, .font_size = .sm, .overflow = .hidden, .opacity = 0.8 + 0.15 * drag.lift } };
+    _ = try line.open(ctx);
+    switch (drag.item) {
+        .group => |id| {
+            const entry = self.config.data.groups[self.config.groupIndex(id).?];
+            try ctx.e(Text{ .key = key.indexed(1), .content = if (entry.collapsed) icons.group_closed else icons.group_open, .selectable = false, .style = &.{ .width = .fixed(14), .font = "lucide", .font_size = .{ .px = 14 } } });
+            try ctx.e(Text{ .key = key.indexed(2), .content = try diff.safeText(ctx.arena(), entry.name), .selectable = false, .style = &.{ .width = .grow(), .wrap = false, .overflow = .hidden } });
+        },
+        .repository => |index| {
+            const repository = self.config.data.repositories[index];
+            const icon = Rect{ .key = key.indexed(3), .style = comptime &.{ .width = .fixed(26), .height = .fixed(26), .justify = .center, .@"align" = .center } };
+            _ = try icon.open(ctx);
+            if (icons.find(self.lucide, repository.icon) orelse icons.find(self.lucide, icons.default_project)) |glyph|
+                try ctx.e(Text{ .key = key.indexed(1), .content = glyph.text(), .selectable = false, .style = &.{ .font = "lucide", .font_size = .{ .px = 15 }, .foreground = if (projectTint(ctx, repository.icon_color)) |color| .{ .color = color } else null } });
+            try icon.close(ctx);
+            try ctx.e(Text{ .key = key.indexed(2), .content = try diff.safeText(ctx.arena(), repository.label()), .selectable = false, .style = &.{ .width = .grow(), .wrap = false, .overflow = .hidden, .padding = .xy(6, 0) } });
+        },
+    }
+    try line.close(ctx);
+}
 /// A workspace entry: the icon opens its picker, the name selects the repository.
 fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.Repository) !bool {
     const active = self.config.data.selected == i;
-    const name = try diff.safeText(ctx.arena(), std.fs.path.basename(std.mem.trimEnd(u8, repository.path, "/\\")));
-    const line = Rect{ .key = ui.Key.str("repository-row").indexed(i), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .padding = .init(0, 0, 0, 4), .radius = .md, .background = if (active) themes.selection(ctx.ui().theme) else .transparent } };
+    const name = try diff.safeText(ctx.arena(), repository.label());
+    const line = Rect{ .key = ui.Key.str("repository-row").indexed(i), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .padding = .init(0, 0, 0, if (repository.group != 0) 18 else 4), .radius = .md, .background = if (active) themes.selection(ctx.ui().theme) else .transparent } };
     _ = try line.open(ctx);
     const icon_key = ui.Key.str("repository-icon").indexed(i);
     const icon_button = Button{ .key = icon_key, .style = &.{ .width = .fixed(26), .height = .fixed(26), .padding = .all(0), .radius = .{ .fixed = 6 }, .background = .transparent, .foreground = if (active) .text else .dimmed, .hover = &.{ .background = .toned, .state_layer = 0 }, .active = &.{ .background = .muted, .state_layer = 0 } } };
@@ -1178,6 +1466,102 @@ fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.R
     try b.close(ctx);
     try line.close(ctx);
     return response.clicked;
+}
+/// A group heading; clicking it shows or hides the group's entries.
+fn groupRow(ctx: *ui.Frame, group: config_mod.Group) !bool {
+    const name = try diff.safeText(ctx.arena(), group.name);
+    const key = ui.Key.str("group-row").indexed(group.id);
+    const b = Button{ .key = key, .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .@"align" = .center, .padding = .xy(10, 5), .gap = 6, .radius = .md, .font_size = .sm, .background = .transparent, .foreground = .dimmed } };
+    const response = try b.openResponse(ctx);
+    // A button offers assistive tools no expand action, so the name carries the state.
+    try ctx.ui().setAccessibility(response.id, .{ .role = .button, .name = if (group.collapsed) try std.fmt.allocPrint(ctx.arena(), "{s}, collapsed", .{name}) else name });
+    try ctx.e(Text{ .key = key.indexed(1), .content = if (group.collapsed) icons.group_closed else icons.group_open, .selectable = false, .style = &.{ .width = .fixed(14), .font = "lucide", .font_size = .{ .px = 14 } } });
+    try truncatedLabel(ctx, key.indexed(10), name);
+    try b.close(ctx);
+    return response.clicked;
+}
+/// The sidebar name of a workspace path, or its folder name when it is not listed.
+fn displayName(self: *Self, path_value: []const u8) []const u8 {
+    for (self.config.data.repositories) |repository| if (config_mod.equalPath(repository.path, path_value)) return repository.label();
+    return std.fs.path.basename(std.mem.trimEnd(u8, path_value, "/\\"));
+}
+fn openNameDialog(self: *Self, target: NameTarget) !void {
+    self.name_input.clearRetainingCapacity();
+    switch (target) {
+        .repository => |index| try self.name_input.appendSlice(self.a, self.config.data.repositories[index].label()),
+        .group => |id| try self.name_input.appendSlice(self.a, self.config.data.groups[self.config.groupIndex(id).?].name),
+        .new_group => {},
+    }
+    self.name_target = target;
+    self.name_focus = true;
+    self.name_open = true;
+}
+/// Names a group, or gives a workspace entry an alias. Nothing on disk is renamed.
+fn nameDialog(self: *Self, ctx: *ui.Frame) !void {
+    const repositories = self.config.data.repositories;
+    switch (self.name_target) {
+        .repository => |index| if (index >= repositories.len) {
+            self.name_open = false;
+        },
+        .group => |id| if (self.config.groupIndex(id) == null) {
+            self.name_open = false;
+        },
+        .new_group => |member| if (member) |index| if (index >= repositories.len) {
+            self.name_open = false;
+        },
+    }
+    if (!self.name_open) return;
+    const dialog = ui.component.Dialog{ .key = .str("name-dialog"), .is_open = &self.name_open, .style = &.{ .width = .fixed(460), .gap = 14 } };
+    _ = try dialog.open(ctx);
+    var placeholder: []const u8 = "Group name";
+    switch (self.name_target) {
+        .repository => |index| {
+            placeholder = std.fs.path.basename(std.mem.trimEnd(u8, repositories[index].path, "/\\"));
+            try heading(ctx, "Rename project", "This changes the name shown in Weaver. The folder on disk keeps its name.");
+        },
+        .group => try heading(ctx, "Rename group", "Choose a new name for this group."),
+        .new_group => |member| try heading(ctx, "New group", if (member) |index| try std.fmt.allocPrint(ctx.arena(), "Name the group to move {s} into.", .{repositories[index].label()}) else "Groups are folders in the sidebar for your repositories."),
+    }
+    const input_key = ui.Key.str("name-input");
+    // Read Enter first: the focused field consumes the frame's keys.
+    const enter = ctx.ui().focused(input_key.hash()) and (ctx.ui().input.keyPressed(.enter) or ctx.ui().input.keyPressed(.kp_enter));
+    try ctx.e(TextInput{ .key = input_key, .buf = &self.name_input, .bytes_max = config_mod.name_bytes_max, .placeholder = try diff.safeText(ctx.arena(), placeholder), .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
+    if (self.name_focus) {
+        self.name_focus = false;
+        ctx.ui().state.focused = input_key.hash();
+        // Select the current name so typing replaces it.
+        const edit = try ctx.ui().state.getOrCreate(.text_input, ctx.ui().allocator, input_key.hash());
+        edit.sel_anchor = 0;
+        edit.cursor = @intCast(self.name_input.items.len);
+        ctx.requestRedraw();
+    }
+    const name = std.mem.trim(u8, self.name_input.items, " \t");
+    // An empty project name goes back to the folder name; a group needs one.
+    const ready = name.len > 0 or self.name_target == .repository;
+    const entered = ready and enter;
+    const actions = try row(ctx, "name-actions");
+    if (try button(ctx, "name-save", if (self.name_target == .new_group) "Create" else "Save", ready, true) or entered) {
+        switch (self.name_target) {
+            .repository => |index| try self.config.rename(self.io, index, if (std.mem.eql(u8, name, placeholder)) "" else name),
+            .group => |id| try self.config.renameGroup(self.io, id, name),
+            .new_group => |member| {
+                const id = try self.config.addGroup(self.io, name);
+                if (member) |index| try self.config.setGroup(self.io, index, id);
+            },
+        }
+        self.name_open = false;
+    }
+    if (self.name_target == .repository and repositories[self.name_target.repository].name.len > 0) {
+        if (try button(ctx, "name-reset", "Use folder name", true, false)) {
+            try self.config.rename(self.io, self.name_target.repository, "");
+            self.name_open = false;
+        }
+    }
+    if (try button(ctx, "name-cancel", "Cancel", true, false)) self.name_open = false;
+    // Enter closes the dialog without a pointer event to draw the next frame.
+    if (!self.name_open) ctx.requestRedraw();
+    try actions.close(ctx);
+    _ = try dialog.closeResponse(ctx);
 }
 fn openIconPicker(self: *Self, index: usize) void {
     self.icon_target = index;
@@ -1235,7 +1619,7 @@ fn iconDialog(self: *Self, ctx: *ui.Frame) !void {
     const repository = self.config.data.repositories[self.icon_target];
     const dialog = ui.component.Dialog{ .key = .str("icon-dialog"), .is_open = &self.icon_open, .style = &.{ .width = .fixed(icon_cell * icon_columns + 46), .gap = 14 } };
     _ = try dialog.open(ctx);
-    try heading(ctx, "Project icon", try std.fmt.allocPrint(ctx.arena(), "Pick an icon and color for {s}.", .{std.fs.path.basename(std.mem.trimEnd(u8, repository.path, "/\\"))}));
+    try heading(ctx, "Project icon", try std.fmt.allocPrint(ctx.arena(), "Pick an icon and color for {s}.", .{repository.label()}));
     const colors = try row(ctx, "icon-colors");
     if (try swatch(ctx, .str("icon-color-default"), "Default color", ctx.ui().theme.dimmed, projectTint(ctx, repository.icon_color) == null)) try self.config.setIcon(self.io, self.icon_target, repository.icon, "");
     for (icons.project_colors, 0..) |color, i| {
@@ -1268,7 +1652,7 @@ fn toolbar(self: *Self, ctx: *ui.Frame) !void {
     _ = try bar.open(ctx);
     const title = Rect{ .key = .str("toolbar-title"), .style = &.{ .width = .grow(), .direction = .column, .gap = 3 } };
     _ = try title.open(ctx);
-    try ctx.e(Text{ .key = .str("repo-title"), .content = try diff.safeText(ctx.arena(), if (self.busy and self.loading_path.len > 0) std.fs.path.basename(std.mem.trimEnd(u8, self.loading_path, "/\\")) else if (self.path()) |p| std.fs.path.basename(std.mem.trimEnd(u8, p, "/\\")) else "Your next idea starts here"), .style = &.{ .font_size = .lg } });
+    try ctx.e(Text{ .key = .str("repo-title"), .content = try diff.safeText(ctx.arena(), if (self.busy and self.loading_path.len > 0) self.displayName(self.loading_path) else if (self.path()) |p| self.displayName(p) else "Your next idea starts here"), .style = &.{ .font_size = .lg } });
     try label(ctx, "branch", if (self.read_busy) "Scanning repository changes…" else if (self.snapshot) |s| try std.fmt.allocPrint(ctx.arena(), "\u{e8d4}  {s}   ·   {s}   ·   {s}", .{ s.branch, self.provider.name, try syncSummary(ctx.arena(), s) }) else "A native home for your repositories", .dimmed);
     try title.close(ctx);
     const ready = self.available() and self.snapshot != null;
@@ -2266,6 +2650,7 @@ fn githubPage(self: *Self, ctx: *ui.Frame) !void {
 }
 fn dialogs(self: *Self, ctx: *ui.Frame) !void {
     try self.iconDialog(ctx);
+    try self.nameDialog(ctx);
     try self.remoteDialog(ctx);
     try self.failureDialog(ctx);
     if (!self.add_open) self.setup_notice = false;
