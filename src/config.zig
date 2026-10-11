@@ -42,7 +42,7 @@ pub const Repository = struct {
 /// A virtual folder of workspace entries. Groups are listed in display order.
 pub const Group = struct { id: u32, name: []const u8, collapsed: bool = false };
 pub const name_bytes_max = 64;
-pub const Data = struct { version: u32 = 1, repositories: []Repository = &.{}, groups: []Group = &.{}, selected: usize = 0, theme: Theme = .graphite, accent: []const u8 = "#B4A0FF", text_size: TextSize = .medium, diff_font: DiffFont = .mono, diff_font_size: u8 = 11, split_diff: bool = false, sidebar_width: u16 = 212, changes_width: u16 = 308, oauth_client_id: []const u8 = "", release_repo: []const u8 = "", extensions: []ExtensionState = &.{}, auto_refresh: bool = true, auto_fetch: bool = true, auto_update_check: bool = true, github_login: []const u8 = "" };
+pub const Data = struct { version: u32 = 1, repositories: []Repository = &.{}, groups: []Group = &.{}, selected: usize = 0, theme: Theme = .dark, accent: []const u8 = "#B4A0FF", text_size: TextSize = .medium, diff_font: DiffFont = .mono, diff_font_size: u8 = 11, split_diff: bool = false, sidebar_width: u16 = 212, changes_width: u16 = 308, oauth_client_id: []const u8 = "", release_repo: []const u8 = "", extensions: []ExtensionState = &.{}, auto_refresh: bool = true, auto_fetch: bool = true, auto_update_check: bool = true, github_login: []const u8 = "" };
 pub const Config = struct {
     arena: std.heap.ArenaAllocator,
     data: Data,
