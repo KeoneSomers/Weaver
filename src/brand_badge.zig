@@ -20,15 +20,33 @@ comptime {
         @compileError("Badge SVG changed: run python scripts/generate-badge.py and zig fmt src/brand_badge_svg.zig");
 }
 
-pub fn render(frame: *ui.Frame) !void {
+/// Draws the badge `size` logical pixels square; the artwork is 30.
+pub fn render(frame: *ui.Frame, size: f32) !void {
     const Canvas = ui.component.Canvas;
     const key = ui.Key.str("brand-mark");
     const measured = try frame.ui().state.getOrCreate(.measured, frame.ui().allocator, key.hash());
     if (measured.box.w() == 0) frame.requestRedraw();
     const scale = frame.ui().content_scale;
     const pixel = 1 / scale;
+    const k = size / 30;
     var commands = artwork.commands;
+    var points: [commands.len][4][2]f32 = undefined;
+    for (&commands, &points) |*command, *scaled| switch (command.*) {
+        .fill_rect => |*rect| {
+            rect.x *= k;
+            rect.y *= k;
+            rect.w *= k;
+            rect.h *= k;
+            rect.corner_radius = .all(0.3 * k);
+        },
+        .fill_convex_polygon => |*polygon| {
+            for (polygon.points, scaled[0..polygon.points.len]) |point, *out| out.* = .{ point[0] * k, point[1] * k };
+            polygon.points = scaled[0..polygon.points.len];
+        },
+        else => {},
+    };
     const outer = &commands[0].fill_rect;
+    outer.corner_radius = .all(5.5 * k);
     // Snap absolute edges, including a potentially fractional layout origin.
     const right = @round((measured.box.x() + outer.x + outer.w) * scale) / scale - measured.box.x();
     const bottom = @round((measured.box.y() + outer.y + outer.h) * scale) / scale - measured.box.y();
@@ -41,8 +59,8 @@ pub fn render(frame: *ui.Frame) !void {
     inner.y = outer.y + pixel;
     inner.w = outer.w - 2 * pixel;
     inner.h = outer.h - 2 * pixel;
-    inner.corner_radius = .all(5.5 - pixel);
+    inner.corner_radius = .all(5.5 * k - pixel);
     // Two filled rounded rectangles form a continuous one-device-pixel rim.
     // This avoids the faint, uneven coverage of the previous half-pixel stroke.
-    try frame.e(Canvas{ .key = key, .commands = &commands, .style = &.{ .width = .fixed(30), .height = .fixed(30) } });
+    try frame.e(Canvas{ .key = key, .commands = &commands, .style = &.{ .width = .fixed(size), .height = .fixed(size) } });
 }

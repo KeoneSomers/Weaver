@@ -14,7 +14,7 @@ const process = @import("process.zig");
 const themes = @import("themes.zig");
 const icons = @import("icons.zig");
 const AppIcon = @import("app_icon.zig");
-const brand_badge = @import("brand_badge.zig");
+const titlebar = @import("titlebar.zig");
 const diff = @import("diff.zig");
 const file_picker = @import("file_picker.zig");
 const path_selection = @import("path_selection.zig");
@@ -292,6 +292,7 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
         app_icon.deinit();
     }
     app_icon = try AppIcon.init(&app.main_viewport.window);
+    titlebar.install(&app.main_viewport.window);
     try app.main_viewport.ui_ctx.ui.font.addFace("mono", @embedFile("mono_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("devicon", @embedFile("file_icon_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("lucide", @embedFile("toolbar_icon_font"));
@@ -1306,7 +1307,17 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
         ctx.requestRedraw();
     }
     const extent = ctx.input().logical_extent;
-    const root = Rect{ .key = .str("root"), .style = &.{ .width = .fixed(@floatFromInt(extent.width)), .height = .fixed(@floatFromInt(extent.height)), .direction = .column, .background = .bg, .font_size = .sm, .padding = .all(root_padding), .gap = 8 } };
+    const frame_rect = Rect{ .key = .str("window"), .style = &.{ .width = .fixed(@floatFromInt(extent.width)), .height = .fixed(@floatFromInt(extent.height)), .direction = .column, .background = .bg } };
+    _ = try frame_rect.open(ctx);
+    try titlebar.open(ctx);
+    if (self.shownPath()) |file_path| {
+        try fileIconSized(ctx, .str("title-file-icon"), file_path, 14);
+        try ctx.e(Text{ .key = .str("title-file"), .content = try diff.safeText(ctx.arena(), std.fs.path.basename(file_path)), .selectable = false, .style = &.{ .wrap = false, .font_size = .sm } });
+        if (std.fs.path.dirname(file_path)) |directory|
+            try ctx.e(Text{ .key = .str("title-directory"), .content = try diff.safeText(ctx.arena(), directory), .selectable = false, .style = &.{ .wrap = false, .overflow = .hidden, .foreground = .dimmed, .font_size = .xs } });
+    }
+    try titlebar.close(ctx, &self.app.main_viewport.window, self.lucide);
+    const root = Rect{ .key = .str("root"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .font_size = .sm, .padding = .init(0, root_padding, root_padding, root_padding), .gap = 8 } };
     _ = try root.open(ctx);
     const body = Rect{ .key = .str("body"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row, .gap = 10 } };
     _ = try body.open(ctx);
@@ -1342,6 +1353,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     try status.close(ctx);
     try self.dragGhost(ctx);
     try root.close(ctx);
+    try frame_rect.close(ctx);
     try self.dialogs(ctx);
     if (self.available()) {
         for (ctx.droppedPaths()) |p| {
@@ -1396,11 +1408,6 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
 fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     const panel = Rect{ .key = .str("sidebar"), .style = &.{ .width = .fixed(212), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 2, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try panel.open(ctx);
-    const brand = Rect{ .key = .str("brand-row"), .style = &.{ .direction = .row, .gap = 10, .@"align" = .center, .padding = .xy(6, 10) } };
-    _ = try brand.open(ctx);
-    try brand_badge.render(ctx);
-    try ctx.e(Text{ .key = .str("brand"), .content = "weaver", .style = &.{ .font_size = .lg, .foreground = .text } });
-    try brand.close(ctx);
     try sectionLabel(ctx, "workspace-label", "Workspace");
     inline for (.{ .{ Page.changes, "\u{e86f}  Changes" }, .{ Page.history, "\u{e889}  History" }, .{ Page.operations, "\u{e8d4}  Repository" } }) |entry| {
         if (try nav(ctx, entry[1], self.page == entry[0], self.canNavigate())) {
@@ -1619,7 +1626,7 @@ fn dragGhost(self: *Self, ctx: *ui.Frame) !void {
     const drag = self.drag orelse return;
     const key = ui.Key.str("drag-ghost");
     const group = drag.item == .group;
-    const line = Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ drag.pos[0] - root_padding + 4 * drag.lift, drag.pos[1] - root_padding - 2 * drag.lift }, .width = .fixed(drag.width), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .gap = if (group) 6 else 0, .padding = .init(0, 8, 0, if (group) 10 else 4 + 14 * drag.indent), .radius = .md, .background = .toned, .border_width = .all(1), .border_color = .accent, .foreground = .text, .font_size = .sm, .overflow = .hidden, .opacity = 0.8 + 0.15 * drag.lift } };
+    const line = Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ drag.pos[0] - root_padding + 4 * drag.lift, drag.pos[1] - titlebar.height - 2 * drag.lift }, .width = .fixed(drag.width), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .gap = if (group) 6 else 0, .padding = .init(0, 8, 0, if (group) 10 else 4 + 14 * drag.indent), .radius = .md, .background = .toned, .border_width = .all(1), .border_color = .accent, .foreground = .text, .font_size = .sm, .overflow = .hidden, .opacity = 0.8 + 0.15 * drag.lift } };
     _ = try line.open(ctx);
     switch (drag.item) {
         .group => |id| {
@@ -1918,6 +1925,14 @@ fn recovery(self: *Self, ctx: *ui.Frame, snapshot: model.Snapshot) !void {
     }
     try bar.close(ctx);
 }
+/// Path of the file whose diff is on screen.
+fn shownPath(self: *const Self) ?[]const u8 {
+    if (self.page != .changes and self.page != .history) return null;
+    const snapshot = self.snapshot orelse return null;
+    if (self.busy and self.loading_path.len > 0 and !config_mod.equalPath(snapshot.path, self.loading_path)) return null;
+    const shown = if (self.page == .history) (self.revision orelse return null).files else snapshot.files;
+    return if (self.selected_file < shown.len) shown[self.selected_file].path else null;
+}
 fn worktree(self: *Self, ctx: *ui.Frame) !void {
     // While another repository opens, keep the panels in place so the layout does not jump.
     const switching = self.busy and self.loading_path.len > 0 and (self.snapshot == null or !config_mod.equalPath(self.snapshot.?.path, self.loading_path));
@@ -2152,22 +2167,13 @@ fn diffView(self: *Self, ctx: *ui.Frame, file: model.File) !void {
         self.split_rows = try diff.pairs(self.a, content);
         self.diff_rows_valid = true;
     }
-    const header = try row(ctx, "diff-header");
-    try ctx.ui().setAccessibility(header.key.hash(), .{ .role = .generic, .name = try diff.safeText(ctx.arena(), file.path) });
-    try fileIcon(ctx, .str("diff-file-icon"), file.path);
-    const title = Rect{ .key = .str("diff-title"), .style = &.{ .width = .grow(), .direction = .column, .gap = 4, .overflow = .hidden } };
-    _ = try title.open(ctx);
-    try ctx.e(Text{ .key = .str("diff-path"), .content = try diff.safeText(ctx.arena(), std.fs.path.basename(file.path)), .style = &.{ .width = .grow(), .overflow = .hidden, .font_size = .md } });
-    try ctx.e(Text{ .key = .str("diff-directory"), .content = try diff.safeText(ctx.arena(), std.fs.path.dirname(file.path) orelse "Repository root"), .style = &.{ .width = .grow(), .overflow = .hidden, .foreground = .dimmed, .font_size = .xs } });
-    try title.close(ctx);
+    try self.diffDetails(ctx, file);
+    const actions = try row(ctx, "diff-actions");
     try detailBadge(ctx, "diff-status", file.status, if (std.mem.eql(u8, file.status, "Conflict")) .@"error" else .dimmed);
     if (file.stats_available and !file.binary) {
         try label(ctx, "diff-add", try std.fmt.allocPrint(ctx.arena(), "+{d}", .{file.additions}), .success);
         try label(ctx, "diff-del", try std.fmt.allocPrint(ctx.arena(), "−{d}", .{file.deletions}), .@"error");
     }
-    try header.close(ctx);
-    try self.diffDetails(ctx, file);
-    const actions = try row(ctx, "diff-actions");
     try ctx.e(Text{ .key = .str("diff-state"), .content = if (self.page == .history) "Committed changes" else if (file.staged) "Staged changes" else "Working tree", .style = &.{ .width = .grow(), .foreground = .dimmed, .font_size = .xs } });
     if (try button(ctx, "copy-diff", "Copy patch", file.lines.len > 0, false)) try ctx.writeClipboard(file.patch);
     if (try button(ctx, "diff-layout", if (self.split_diff) "Unified" else "Split", true, false)) {
