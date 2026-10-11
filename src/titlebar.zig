@@ -47,6 +47,7 @@ var press_serial: u32 = 0;
 /// Wayland: Knots reads only the fullscreen state, so this follows Weaver's own requests.
 var maximized = false;
 var last_press_ms: i64 = 0;
+var serial_pointer = false;
 
 /// Removes the native title bar. Call once, after creating the window.
 pub fn install(window: *Window) void {
@@ -75,6 +76,18 @@ pub fn install(window: *Window) void {
         },
         else => {},
     }
+}
+
+/// Knots drops button serials, so a second pointer object records them.
+/// The seat may announce its pointer only after the window exists, so this is retried.
+fn watchSerials(window: *Window) void {
+    if (serial_pointer) return;
+    const state = window.backend.state;
+    if (state.shared.pointer == null) return;
+    const seat = state.shared.seat orelse return;
+    const pointer = seat.getPointer() catch return;
+    pointer.setListener(*u32, SerialListener(@typeInfo(@TypeOf(pointer)).pointer.child).listen, &press_serial);
+    serial_pointer = true;
 }
 
 fn SerialListener(comptime Pointer: type) type {
@@ -208,6 +221,7 @@ fn control(ctx: *ui.Frame, glyphs: []const icons.Glyph, icon: []const u8, name: 
 fn pointerActions(ctx: *ui.Frame, window: *Window) void {
     const state = window.backend.state;
     const seat = state.shared.seat orelse return;
+    watchSerials(window);
     const input = &ctx.ui().input;
     const pressed = input.mouseButton(.left).pressed;
     const size = window.getSize();
@@ -221,7 +235,8 @@ fn pointerActions(ctx: *ui.Frame, window: *Window) void {
         ctx.ui().requestCursor(if (top or bottom) (if (left == right) .resize_vertical else if (left == top) .resize_diagonal_nw_se else .resize_diagonal_ne_sw) else .resize_horizontal);
         if (!pressed) return;
         state.toplevel.resize(seat, press_serial, if (top) (if (left) .top_left else if (right) .top_right else .top) else if (bottom) (if (left) .bottom_left else if (right) .bottom_right else .bottom) else if (left) .left else .right);
-    } else if (pressed and x < @as(f64, @floatFromInt(size.width)) - controls_width and ctx.ui().leftPressed(bar.key.hash(), .within)) {
+    } else if (pressed and y < height and x < @as(f64, @floatFromInt(size.width)) - controls_width) {
+        // The bar is a plain rect with no hit record, so the press is located by position.
         const again = input.now_ms - last_press_ms < double_click_ms;
         last_press_ms = if (again) 0 else input.now_ms;
         if (again) toggleMaximized(window) else state.toplevel.move(seat, press_serial);
