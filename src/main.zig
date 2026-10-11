@@ -31,9 +31,10 @@ pub fn main(init: std.process.Init) !void {
     defer git.shutdown();
     var app = try App.init(init.io, init.gpa, init.environ_map);
     defer app.deinit();
-    if (args.len > 2 and (std.mem.eql(u8, args[1], "--capture") or std.mem.eql(u8, args[1], "--capture-live"))) {
+    if (args.len > 2 and (std.mem.eql(u8, args[1], "--capture") or std.mem.eql(u8, args[1], "--capture-live") or std.mem.eql(u8, args[1], "--capture-git"))) {
         app.capture_path = args[2];
-        if (std.mem.eql(u8, args[1], "--capture-live")) app.capture_delay_ns = 8 * std.time.ns_per_s;
+        if (std.mem.eql(u8, args[1], "--capture-live") or std.mem.eql(u8, args[1], "--capture-git")) app.capture_delay_ns = 8 * std.time.ns_per_s;
+        if (std.mem.eql(u8, args[1], "--capture-git")) app.git_health_open = true;
         if (args.len > 3) try app.config.add(init.io, args[3]);
         if (args.len > 4) app.page = std.meta.stringToEnum(@FieldType(App, "page"), args[4]) orelse return error.UnknownPage;
         if (args.len > 5 and std.mem.eql(u8, args[5], "split")) app.split_diff = true;

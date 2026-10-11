@@ -9,6 +9,7 @@ pub const Setting = struct { id: []const u8, title: []const u8, description: []c
 pub const Manifest = struct { api_version: u32 = 1, id: []const u8, name: []const u8, version: []const u8, description: []const u8, publisher: []const u8 = "Weaver", executable: ?[]const u8 = null, permissions: []const Permission = &.{}, commands: []const Command = &.{}, settings: []const Setting = &.{} };
 pub const Extension = struct { manifest: Manifest, enabled: bool = true, builtin: bool = true, manifest_path: []const u8 = "", settings: []config.SettingValue = &.{}, inputs: []std.ArrayList(u8) = &.{} };
 pub const bundled = [_]Extension{
+    .{ .manifest = .{ .id = "weaver.git", .name = "Git", .version = "1.0.0", .description = "Installed Git version, stable updates and system installation assistance.", .permissions = &.{ .network, .process_execution }, .settings = &.{.{ .id = "git.check_updates", .title = "Check for stable Git updates", .description = "true or false; checks at most once a day", .default = "true" }} } },
     .{ .manifest = .{ .id = "weaver.github", .name = "GitHub", .version = "1.0.0", .description = "Device sign-in, secure credentials and repository publishing.", .permissions = &.{ .repository_read, .network } } },
     .{ .manifest = .{ .id = "weaver.lfs", .name = "Git LFS", .version = "1.0.0", .description = "Track large files, transfer objects and manage GitHub LFS locks.", .permissions = &.{ .repository_read, .repository_write, .network }, .commands = &.{
         .{ .id = "lfs.install", .title = "Enable LFS for this repository", .operation = .lfs_install },
@@ -29,6 +30,16 @@ pub const Registry = struct {
         var self = Registry{ .arena = .init(a) };
         errdefer self.deinit();
         try self.items.appendSlice(self.arena.allocator(), &bundled);
+        const arena = self.arena.allocator();
+        for (self.items.items) |*extension| {
+            extension.settings = try arena.alloc(config.SettingValue, extension.manifest.settings.len);
+            extension.inputs = try arena.alloc(std.ArrayList(u8), extension.manifest.settings.len);
+            for (extension.manifest.settings, 0..) |setting, i| {
+                extension.settings[i] = .{ .id = setting.id, .value = setting.default };
+                extension.inputs[i] = .empty;
+                try extension.inputs[i].appendSlice(arena, setting.default);
+            }
+        }
         return self;
     }
     pub fn install(self: *Registry, io: std.Io, path: []const u8) !void {

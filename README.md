@@ -20,7 +20,15 @@ Windows: install Zig with `zvm install 0.17.0`, CMake and Ninja, then:
 & "$env:USERPROFILE/.zvm/0.17.0/zig.exe" build run
 ```
 
-Linux needs Wayland development packages (`libwayland-dev`, `wayland-protocols`, `libxkbcommon-dev`, `libdbus-1-dev`, `pkg-config`), a desktop portal with a FileChooser backend, and a Vulkan 1.3 driver. macOS uses WebGPU. On Linux/macOS run `sh scripts/bootstrap.sh`, then `zig build` and `zig build run`.
+Linux: one command installs the system packages (apt, dnf, pacman or zypper, using sudo), downloads the pinned Zig into `.tools` if it is not already on `PATH`, fetches the source dependencies and builds:
+
+```sh
+sh scripts/setup-linux.sh
+```
+
+It prints the command to run Weaver when it finishes. Set `SKIP_PACKAGES=1` to install the packages yourself: a C/C++ compiler, CMake, `pkg-config`, and the development packages for OpenSSL, Wayland, `wayland-protocols`, xkbcommon and D-Bus. Running Weaver needs a Wayland session, a desktop portal with a FileChooser backend, and a Vulkan 1.3 driver.
+
+macOS uses WebGPU. Run `sh scripts/bootstrap.sh`, then `zig build` and `zig build run`.
 
 Runtime requirements: Git, curl, and Git LFS for LFS repositories. Existing Git credential helpers, SSH configuration and agents remain available. GitHub sign-in needs Git Credential Manager, which Git for Windows includes; install it separately on macOS and Linux. Linux secure GitHub storage requires `secret-tool`. Tokens never go in settings or remote URLs.
 

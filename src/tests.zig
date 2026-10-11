@@ -6,6 +6,7 @@ test {
     _ = @import("process.zig");
     _ = @import("credentials.zig");
     _ = @import("updater.zig");
+    _ = @import("git_runtime.zig");
     _ = @import("integration_test.zig");
     _ = @import("path_selection.zig");
     _ = @import("repository_watch.zig");

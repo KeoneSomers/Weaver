@@ -8,11 +8,13 @@ const config_mod = @import("config.zig");
 const plugins = @import("plugins.zig");
 const github = @import("github.zig");
 const updater = @import("updater.zig");
+const git_runtime = @import("git_runtime.zig");
 const credentials = @import("credentials.zig");
 const process = @import("process.zig");
 const themes = @import("themes.zig");
 const icons = @import("icons.zig");
 const AppIcon = @import("app_icon.zig");
+const brand_badge = @import("brand_badge.zig");
 const diff = @import("diff.zig");
 const file_picker = @import("file_picker.zig");
 const path_selection = @import("path_selection.zig");
@@ -248,6 +250,14 @@ capture_delay_ns: u64 = 0,
 capture_elapsed_ns: u64 = 0,
 capture_requested: bool = false,
 update_checked: bool = false,
+git_health: ?git_runtime.Snapshot = null,
+git_health_busy: bool = false,
+git_installing: bool = false,
+git_health_open: bool = false,
+git_probe_at: i64 = 0,
+git_updates_at: i64 = 0,
+git_install_report: []const u8 = "",
+git_install_failed: bool = false,
 
 pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Map) !Self {
     var config = try config_mod.Config.init(io, a, env);
@@ -287,6 +297,8 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
 pub fn deinit(self: *Self) void {
     // App shutdown joins/cancels background tasks before freeing their state.
     self.app.deinit();
+    if (self.git_health) |*health| health.deinit();
+    self.a.free(self.git_install_report);
     self.app_icon.deinit();
     self.watcher.deinit(self.a);
     if (self.snapshot) |*s| s.deinit();
@@ -308,6 +320,7 @@ pub fn deinit(self: *Self) void {
     self.config.deinit();
 }
 pub fn start(self: *Self) !void {
+    try self.checkGitRuntime(false);
     if (self.path()) |repo_path| {
         if (providers.byId(self.config.data.repositories[self.config.data.selected].provider)) |provider| {
             self.provider = provider;
@@ -336,6 +349,7 @@ fn refreshTick(view: *knots.View, ctx: *ui.Frame, tick: repository_watch.Signal)
     if (tick == .cancelled) return;
     ctx.requestRedraw(); // Also advances relative fetch times while otherwise idle.
     const self = of(view);
+    try self.checkGitRuntime(false);
     if (tick == .reconfigure) {
         if (self.snapshot) |snapshot| {
             self.watcher.reset(self.a, snapshot.path) catch {};
@@ -352,11 +366,147 @@ fn refreshTick(view: *knots.View, ctx: *ui.Frame, tick: repository_watch.Signal)
 fn of(view: *knots.View) *Self {
     return @alignCast(@fieldParentPtr("app", view.app));
 }
+const GitHealthJob = struct {
+    arena: std.heap.ArenaAllocator,
+    environment: *const std.process.Environ.Map,
+    updates: bool,
+    install: ?git_runtime.Snapshot = null,
+    fn deinit(self: *GitHealthJob, a: std.mem.Allocator) void {
+        self.arena.deinit();
+        a.destroy(self);
+    }
+};
+const GitHealthResult = struct {
+    snapshot: git_runtime.Snapshot,
+    updates: bool,
+    installing: bool,
+    failed: bool = false,
+    message: []const u8 = "",
+    details: []const u8 = "",
+    pub fn deinit(self: *GitHealthResult) void {
+        self.snapshot.deinit();
+    }
+};
+fn gitUpdateChecks(self: *const Self) bool {
+    for (self.registry.items.items) |extension| if (std.mem.eql(u8, extension.manifest.id, "weaver.git")) {
+        for (extension.settings) |setting| if (std.mem.eql(u8, setting.id, "git.check_updates"))
+            return std.ascii.eqlIgnoreCase(std.mem.trim(u8, setting.value, " \t\r\n"), "true");
+    };
+    return false;
+}
+fn checkGitRuntime(self: *Self, force: bool) !void {
+    if (!self.registry.enabled("weaver.git") or self.git_health_busy) return;
+    const now = std.Io.Clock.real.now(self.io).toSeconds();
+    if (!force and self.git_probe_at != 0 and now >= self.git_probe_at and now - self.git_probe_at < 300) return;
+    // Publish local detection first; an offline release server must not delay the version label.
+    try self.launchGitHealth(null, self.git_health != null and self.gitUpdateChecks() and (force or self.git_updates_at == 0 or now < self.git_updates_at or now - self.git_updates_at >= 86400));
+    self.git_probe_at = now;
+}
+fn launchGitHealth(self: *Self, install: ?git_runtime.Snapshot, updates: bool) !void {
+    const job = try self.a.create(GitHealthJob);
+    job.* = .{ .arena = .init(self.a), .environment = self.environment, .updates = updates };
+    errdefer job.deinit(self.a);
+    const a = job.arena.allocator();
+    if (install) |health| {
+        // Copy the action inputs: an unrelated UI frame must never invalidate them.
+        var copy = health;
+        copy.executable = try a.dupe(u8, health.executable);
+        copy.manager_executable = try a.dupe(u8, health.manager_executable);
+        copy.version = try a.dupe(u8, health.version);
+        job.install = copy;
+        self.a.free(self.git_install_report);
+        self.git_install_report = "";
+        self.git_install_failed = false;
+    }
+    try self.app.dispatchWithCleanup(self.app.main_viewport.id, gitHealthWork, .{ self.io, self.a, job }, gitHealthDone, GitHealthResult.deinit);
+    self.git_health_busy = true;
+    self.git_installing = install != null;
+}
+fn gitHealthWork(io: std.Io, a: std.mem.Allocator, job: *GitHealthJob) GitHealthResult {
+    defer job.deinit(a);
+    var output: ?process.Result = null;
+    defer if (output) |r| r.deinit(a);
+    var failure: ?[]const u8 = null;
+    if (job.install) |health| {
+        // Verify that the same executable/owning manager still supplies Git before
+        // changing the computer; custom replacements fail closed.
+        var current = git_runtime.inspect(io, a, job.environment, false);
+        defer current.deinit();
+        if (current.presence != health.presence or current.manager != health.manager or current.install_scope != health.install_scope or
+            !std.mem.eql(u8, current.executable, health.executable) or
+            !std.mem.eql(u8, current.manager_executable, health.manager_executable))
+        {
+            failure = "Git's installation changed. Check again before installing or updating.";
+        } else output = git_runtime.apply(io, a, &health) catch |err| blk: {
+            failure = @errorName(err);
+            break :blk null;
+        };
+    }
+    var result = GitHealthResult{ .snapshot = git_runtime.inspect(io, a, job.environment, job.updates), .updates = job.updates, .installing = job.install != null };
+    const arena = result.snapshot.arena.allocator();
+    if (failure) |reason| {
+        result.failed = true;
+        result.message = std.fmt.allocPrint(arena, "Git installation could not complete: {s}. Use the installation instructions or your package manager.", .{reason}) catch "Git installation failed.";
+    } else if (output) |r| {
+        if (git_runtime.installationReport(arena, &job.install.?, &result.snapshot, r)) |report| {
+            result.failed = report.failed;
+            result.message = report.message;
+            result.details = report.details;
+        } else |_| {
+            result.failed = true;
+            result.message = "The Git command finished, but its result could not be recorded. Check the detected version before trying again.";
+        }
+    }
+    return result;
+}
+fn gitHealthDone(view: *knots.View, ctx: *ui.Frame, value: GitHealthResult) !void {
+    const self = of(view);
+    var result = value;
+    self.git_health_busy = false;
+    self.git_installing = false;
+    if (!self.registry.enabled("weaver.git")) {
+        result.deinit();
+        return;
+    }
+    var transferred = false;
+    defer if (!transferred) result.deinit();
+    if (!self.gitUpdateChecks()) {
+        result.snapshot.update_available = false;
+        result.snapshot.updates_verified = false;
+        result.snapshot.latest = "";
+        if (result.snapshot.presence == .installed) result.snapshot.check_note = "Automatic Git update checks are disabled.";
+    }
+    if (!result.updates and self.gitUpdateChecks()) if (self.git_health) |old| {
+        if (old.presence == result.snapshot.presence and old.manager == result.snapshot.manager and old.install_scope == result.snapshot.install_scope and
+            std.mem.eql(u8, old.executable, result.snapshot.executable) and std.mem.eql(u8, old.manager_executable, result.snapshot.manager_executable) and std.mem.eql(u8, old.version, result.snapshot.version))
+        {
+            const a = result.snapshot.arena.allocator();
+            result.snapshot.latest = try a.dupe(u8, old.latest);
+            result.snapshot.update_available = old.update_available;
+            result.snapshot.updates_verified = old.updates_verified;
+            result.snapshot.check_note = try a.dupe(u8, old.check_note);
+        } else self.git_updates_at = 0;
+    };
+    if (self.git_health) |*old| old.deinit();
+    self.git_health = result.snapshot;
+    transferred = true;
+    if (result.updates and result.snapshot.presence == .installed) self.git_updates_at = std.Io.Clock.real.now(self.io).toSeconds();
+    if (result.installing) {
+        const report = try diff.safeText(self.a, try std.fmt.allocPrint(ctx.arena(), "{s}\n\n{s}", .{ result.message, result.details }));
+        self.a.free(self.git_install_report);
+        self.git_install_report = report;
+        self.git_install_failed = result.failed;
+        self.message(result.message, result.failed);
+        self.git_health_open = true;
+    }
+    ctx.requestRedraw();
+    if (!result.updates and self.git_updates_at == 0 and result.snapshot.presence == .installed and self.gitUpdateChecks()) try self.checkGitRuntime(true);
+}
 fn available(self: *Self) bool {
-    return !self.busy and !self.picker_open and !self.fetch_busy;
+    return !self.busy and !self.picker_open and !self.fetch_busy and !self.git_installing;
 }
 fn canNavigate(self: *Self) bool {
-    return (!self.busy or self.read_busy) and !self.picker_open;
+    return (!self.busy or self.read_busy) and !self.picker_open and !self.git_installing;
 }
 fn automaticFetch(self: *Self) !void {
     const snapshot = self.snapshot orelse return;
@@ -1134,7 +1284,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     try body.close(ctx);
     const status = Rect{ .key = .str("status"), .style = &.{ .width = .grow(), .height = .fixed(24), .padding = .xy(8, 0), .direction = .row, .gap = 16, .@"align" = .center } };
     _ = try status.open(ctx);
-    const activity = if (self.busy) (if (self.read_busy) "Scanning changes…" else "Working…") else if (self.fetch_busy) "Fetching…" else if (self.counts_busy and !self.counts_quiet) "Counting changes…" else if ((self.preview_busy or self.preview_pending) and !self.preview_quiet) "Loading diff…" else "Ready";
+    const activity = if (self.git_installing) "Installing Git…" else if (self.busy) (if (self.read_busy) "Scanning changes…" else "Working…") else if (self.fetch_busy) "Fetching…" else if (self.counts_busy and !self.counts_quiet) "Counting changes…" else if ((self.preview_busy or self.preview_pending) and !self.preview_quiet) "Loading diff…" else "Ready";
     try ctx.ui().setAccessibility(status.key.hash(), .{ .role = .generic, .name = activity });
     try label(ctx, "status-label", activity, .dimmed);
     if (self.snapshot) |snapshot| if (snapshot.remotes.len > 0) {
@@ -1143,6 +1293,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     };
     const notice_line = std.mem.sliceTo(std.mem.trim(u8, self.notice, " \t\r\n"), '\n');
     try ctx.e(Text{ .key = .str("notice"), .content = try diff.safeText(ctx.arena(), notice_line), .style = &.{ .width = .grow(), .wrap = false, .overflow = .hidden, .foreground = if (self.notice_error) .@"error" else .dimmed, .font_size = .xs } });
+    try self.gitStatus(ctx);
     try label(ctx, "version", "Weaver " ++ options.version, .dimmed);
     try status.close(ctx);
     try self.dragGhost(ctx);
@@ -1203,7 +1354,7 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     _ = try panel.open(ctx);
     const brand = Rect{ .key = .str("brand-row"), .style = &.{ .direction = .row, .gap = 10, .@"align" = .center, .padding = .xy(6, 10) } };
     _ = try brand.open(ctx);
-    try ctx.e(ui.component.Image{ .key = .str("brand-mark"), .source = .{ .pixels = .{ .data = @embedFile("app_icon_pixels"), .width = 64, .height = 64, .upload_policy = .versioned } }, .style = &.{ .width = .fixed(30), .height = .fixed(30) } });
+    try brand_badge.render(ctx);
     try ctx.e(Text{ .key = .str("brand"), .content = "weaver", .style = &.{ .font_size = .lg, .foreground = .text } });
     try brand.close(ctx);
     try sectionLabel(ctx, "workspace-label", "Workspace");
@@ -2207,6 +2358,77 @@ fn operations(self: *Self, ctx: *ui.Frame) !void {
     try label(ctx, "operation-log", self.notice, if (self.notice_error) .@"error" else .text);
     try panel.close(ctx);
 }
+fn gitStatus(self: *Self, ctx: *ui.Frame) !void {
+    if (!self.registry.enabled("weaver.git")) return;
+    const health = if (self.git_health) |*s| s else null;
+    const content = if (health) |s| try s.label(ctx.arena()) else "Git…";
+    const indicator = if (health) |s| s.indicator() else .unknown;
+    const has_update = indicator == .update_available;
+    const git_group = Rect{ .key = .str("git-status-group"), .style = &.{ .height = .fixed(22), .direction = .row, .gap = if (has_update) 6 else 16, .@"align" = .center, .padding = .xy(if (has_update) 4 else 0, 0), .border_width = .all(if (has_update) 1 else 0), .border_color = .toned, .radius = .{ .fixed = 5 } } };
+    _ = try git_group.open(ctx);
+    const version_group = Rect{ .key = .str("git-status-version-group"), .style = &.{ .direction = .row, .gap = 5, .@"align" = .center } };
+    _ = try version_group.open(ctx);
+    try ctx.e(Rect{ .key = .str("git-status-dot"), .style = &.{ .width = .fixed(6), .height = .fixed(6), .radius = .{ .fixed = 3 }, .background = switch (indicator) {
+        .unavailable => .@"error",
+        .update_available => .warning,
+        .current => .success,
+        .unknown => .dimmed,
+    } } });
+    const tooltip = ui.component.Tooltip{ .key = .str("git-status-tooltip"), .content = if (health) |s| s.check_note else "Checking installed Git", .placement = .top };
+    _ = try tooltip.open(ctx);
+    if ((try ctx.interact(Button{ .key = .str("git-status"), .label = try diff.safeText(ctx.arena(), content), .style = &.{ .height = .fixed(20), .padding = .xy(3, 0), .font_size = .xs, .background = .transparent, .foreground = .dimmed, .radius = .sm, .hover = &.{ .background = .muted, .foreground = .text } } })).clicked) self.git_health_open = true;
+    try tooltip.close(ctx);
+    try version_group.close(ctx);
+    if (health) |s| if (s.presence == .missing or s.update_available) {
+        const action = if (s.presence == .missing) "Install Git" else "Update available";
+        if ((try ctx.interact(Button{ .key = .str("git-status-action"), .label = action, .disabled = self.git_installing, .style = &.{ .height = .fixed(20), .padding = .xy(5, 0), .font_size = .xs, .background = .transparent, .foreground = .dimmed, .radius = .sm, .hover = &.{ .background = .muted, .foreground = .text } } })).clicked) self.git_health_open = true;
+    };
+    try git_group.close(ctx);
+}
+fn gitHealthDialog(self: *Self, ctx: *ui.Frame) !void {
+    if (!self.git_health_open or !self.registry.enabled("weaver.git")) return;
+    const dialog = ui.component.Dialog{ .key = .str("git-health-dialog"), .is_open = &self.git_health_open, .style = &.{ .width = .fixed(600), .gap = 14 } };
+    _ = try dialog.open(ctx);
+    try heading(ctx, "Git on this computer", "Installation and stable updates");
+    if (self.git_health) |*health| {
+        try label(ctx, "git-installed-version", try health.label(ctx.arena()), .text);
+        if (health.executable.len > 0) try wrapped(ctx, "git-executable", health.executable, .dimmed);
+        try label(ctx, "git-installation-manager", try std.fmt.allocPrint(ctx.arena(), "Installation: {s}", .{git_runtime.managerName(health.manager)}), .dimmed);
+        if (health.update_available) try label(ctx, "git-latest-version", try std.fmt.allocPrint(ctx.arena(), "Available: {s}", .{health.latest}), .text);
+        try wrapped(ctx, "git-check-note", health.check_note, .dimmed);
+        try wrapped(ctx, "git-manager-description", health.description(), .dimmed);
+        if (git_runtime.canApply(health)) {
+            try wrapped(ctx, "git-apply-command", try std.mem.join(ctx.arena(), " ", try git_runtime.applyArguments(ctx.arena(), health)), .dimmed);
+            if (try button(ctx, "git-install-update", if (health.presence == .missing) "Install Git" else "Update Git", self.available() and !self.git_health_busy and !self.background_busy and !self.counts_busy and !self.preview_busy, true)) {
+                try self.launchGitHealth(health.*, self.gitUpdateChecks());
+                self.message("Installing Git…", false);
+            }
+        }
+        if (!git_runtime.canApply(health) and (health.presence == .missing or health.update_available)) {
+            if (try button(ctx, "git-manual-install-update", if (health.presence == .missing) "Install Git…" else "Update Git…", !self.git_installing, true))
+                try openPath(self.io, self.a, git_runtime.managerInstructions(health.manager, @import("builtin").os.tag));
+        }
+        if (git_runtime.guidedManager(health.manager)) {
+            if (try button(ctx, "git-manage-installation", try std.fmt.allocPrint(ctx.arena(), "Manage Git with {s}…", .{git_runtime.managerName(health.manager)}), !self.git_installing, false))
+                try openPath(self.io, self.a, git_runtime.managerInstructions(health.manager, @import("builtin").os.tag));
+        }
+        if (self.git_installing) try wrapped(ctx, "git-install-progress", "Running the Git installation command. Weaver waits for it to finish, then verifies the installed version. Complete any administrator prompt it opens.", .dimmed);
+        if (self.git_install_report.len > 0) {
+            try label(ctx, "git-last-command", "Last Git command result", .dimmed);
+            const report = Rect{ .key = .str("git-install-output"), .style = &.{ .width = .grow(), .height = .{ .kind = .fit, .max = 180 }, .padding = .xy(12, 10), .radius = .md, .background = .muted, .overflow = .scroll_y } };
+            _ = try report.open(ctx);
+            try ctx.e(Text{ .key = .str("git-install-result"), .content = self.git_install_report, .style = &.{ .width = .grow(), .wrap = true, .font = "mono", .font_size = .xs, .foreground = if (self.git_install_failed) .@"error" else .dimmed } });
+            try report.close(ctx);
+        }
+    } else try label(ctx, "git-health-loading", "Checking installed Git…", .dimmed);
+    const actions = try row(ctx, "git-health-actions");
+    if (try button(ctx, "git-check-again", "Check again", !self.git_health_busy, false)) try self.checkGitRuntime(true);
+    const manager = if (self.git_health) |health| health.manager else .manual;
+    if (try button(ctx, "git-install-instructions", if (git_runtime.guidedManager(manager)) "Manager instructions" else "Installation instructions", !self.git_installing, false)) try openPath(self.io, self.a, git_runtime.managerInstructions(manager, @import("builtin").os.tag));
+    if (try button(ctx, "git-health-close", "Close", true, false)) self.git_health_open = false;
+    try actions.close(ctx);
+    try dialog.close(ctx);
+}
 fn extensions(self: *Self, ctx: *ui.Frame) !void {
     const panel = try pagePanel(ctx, "extensions");
     try heading(ctx, "Extensions", "Make Weaver your own. Bundled tools and installable extensions.");
@@ -2224,12 +2446,19 @@ fn extensions(self: *Self, ctx: *ui.Frame) !void {
         try title.close(ctx);
         try ctx.e(Text{ .key = ui.Key.str("extension-description").indexed(i), .content = extension.manifest.description, .style = &.{ .width = .grow(), .wrap = true, .foreground = .dimmed, .font_size = .xs } });
         try text.close(ctx);
-        if (try toggle(ctx, ui.Key.str("extension-enable").indexed(i), extension.manifest.name, extension.enabled) and !self.busy) {
+        if (try toggle(ctx, ui.Key.str("extension-enable").indexed(i), extension.manifest.name, extension.enabled) and !self.busy and !self.git_installing) {
             extension.enabled = !extension.enabled;
+            if (std.mem.eql(u8, extension.manifest.id, "weaver.git")) {
+                self.git_probe_at = 0;
+                self.git_updates_at = 0;
+            }
             try self.saveExtensions();
             ctx.requestRedraw();
         }
         try head.close(ctx);
+        if (extension.enabled and std.mem.eql(u8, extension.manifest.id, "weaver.git")) {
+            if (try button(ctx, "git-extension-runtime", "Git installation and updates", true, false)) self.git_health_open = true;
+        }
         const permission_names = try ctx.arena().alloc([]const u8, extension.manifest.permissions.len);
         for (permission_names, extension.manifest.permissions) |*name, permission| name.* = switch (permission) {
             .repository_read => "Read repositories",
@@ -2259,11 +2488,20 @@ fn extensions(self: *Self, ctx: *ui.Frame) !void {
                 try ctx.e(Text{ .key = ui.Key.str("extension-setting-title").indexed(i).indexed(j), .content = setting.title, .style = &.{ .foreground = .dimmed, .font_size = .xs } });
                 try ctx.e(TextInput{ .key = ui.Key.str("extension-setting-input").indexed(i).indexed(j), .buf = &extension.inputs[j], .placeholder = setting.description, .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
             }
-            if (try buttonKey(ctx, ui.Key.str("extension-settings-save").indexed(i), "Save extension settings", !self.busy, false)) {
+            if (try buttonKey(ctx, ui.Key.str("extension-settings-save").indexed(i), "Save extension settings", !self.busy and !self.git_installing, false)) {
                 for (extension.settings, 0..) |*setting, j| {
                     if (extension.inputs[j].items.len > 4096) {
                         self.message("Extension settings are limited to 4,096 bytes each.", true);
                         continue;
+                    }
+                    if (std.mem.eql(u8, setting.id, "git.check_updates")) {
+                        const value = std.mem.trim(u8, extension.inputs[j].items, " \t\r\n");
+                        if (!std.ascii.eqlIgnoreCase(value, "true") and !std.ascii.eqlIgnoreCase(value, "false")) {
+                            self.message("Git update checks must be true or false.", true);
+                            continue;
+                        }
+                        self.git_probe_at = 0;
+                        self.git_updates_at = 0;
                     }
                     setting.value = try self.registry.arena.allocator().dupe(u8, extension.inputs[j].items);
                 }
@@ -2649,6 +2887,7 @@ fn githubPage(self: *Self, ctx: *ui.Frame) !void {
     try panel.close(ctx);
 }
 fn dialogs(self: *Self, ctx: *ui.Frame) !void {
+    try self.gitHealthDialog(ctx);
     try self.iconDialog(ctx);
     try self.nameDialog(ctx);
     try self.remoteDialog(ctx);

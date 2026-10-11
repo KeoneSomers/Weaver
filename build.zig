@@ -74,7 +74,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mono_font", b.createModule(.{ .root_source_file = b.path("assets/JetBrainsMono.ttf") }));
     exe.root_module.addImport("file_icon_font", b.createModule(.{ .root_source_file = b.path("assets/devicon.ttf") }));
     exe.root_module.addImport("toolbar_icon_font", b.createModule(.{ .root_source_file = b.path("assets/lucide.ttf") }));
-    exe.root_module.addImport("app_icon_pixels", b.createModule(.{ .root_source_file = b.path("assets/weaver.rgba") }));
+    exe.root_module.addImport("brand_badge_svg", b.createModule(.{ .root_source_file = b.path("assets/weaver-badge.svg") }));
     linkGit(b, exe.root_module, prefix, target.result.os.tag);
     linkDialogs(b, exe.root_module, target.result.os.tag);
     b.installArtifact(exe);
@@ -127,6 +127,7 @@ fn linkDialogs(b: *std.Build, module: *std.Build.Module, os: std.Target.Os.Tag) 
 
 fn linkGit(b: *std.Build, module: *std.Build.Module, prefix: []const u8, os: std.Target.Os.Tag) void {
     module.addLibraryPath(b.path(b.fmt("{s}/lib", .{prefix})));
+    if (os != .windows) module.addRPath(b.path(b.fmt("{s}/lib", .{prefix})));
     module.linkSystemLibrary("git2", .{});
     if (os == .windows) module.linkSystemLibrary("advapi32", .{});
     if (os == .macos) module.linkFramework("Security", .{});

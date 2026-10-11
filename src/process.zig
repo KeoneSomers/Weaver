@@ -1,9 +1,14 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const credentials = @import("credentials.zig");
+const windows = std.os.windows;
+extern "kernel32" fn DuplicateHandle(windows.HANDLE, windows.HANDLE, windows.HANDLE, *windows.HANDLE, u32, windows.BOOL, u32) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn GetExitCodeProcess(windows.HANDLE, *u32) callconv(.winapi) windows.BOOL;
 pub const Result = struct {
     stdout: []u8,
     stderr: []u8,
     ok: bool,
+    exit_code: ?u32 = null,
     pub fn deinit(self: Result, a: std.mem.Allocator) void {
         a.free(self.stdout);
         a.free(self.stderr);
@@ -12,9 +17,23 @@ pub const Result = struct {
 pub fn run(io: std.Io, a: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8, input: ?[]const u8) !Result {
     return runWithEnvironment(io, a, argv, cwd, input, null, 900);
 }
+/// Short, unattended runtime probes must not inherit the Git operation timeout.
+pub fn probe(io: std.Io, a: std.mem.Allocator, argv: []const []const u8, environment: *const std.process.Environ.Map) !Result {
+    return runWithEnvironment(io, a, argv, null, null, environment, 30);
+}
 fn runWithEnvironment(io: std.Io, a: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8, input: ?[]const u8, environment: ?*const std.process.Environ.Map, timeout_s: i64) !Result {
     var child = try std.process.spawn(io, .{ .argv = argv, .cwd = if (cwd) |p| .{ .path = p } else .inherit, .environ_map = environment, .stdin = if (input != null) .pipe else .ignore, .stdout = .pipe, .stderr = .pipe, .create_no_window = true });
     defer child.kill(io);
+    // std.process.Child.Term narrows Windows statuses to eight bits. Keep a
+    // process handle until after wait so package-manager HRESULTs stay intact.
+    var exit_handle: ?windows.HANDLE = null;
+    if (builtin.os.tag == .windows) {
+        var duplicate: windows.HANDLE = undefined;
+        const current = windows.GetCurrentProcess();
+        if (DuplicateHandle(current, child.id.?, current, &duplicate, 0, .FALSE, 2) == .FALSE) return error.ProcessStatusUnavailable;
+        exit_handle = duplicate;
+    }
+    defer if (builtin.os.tag == .windows) if (exit_handle) |handle| windows.CloseHandle(handle);
     var input_future: ?std.Io.Future(anyerror!void) = null;
     if (input) |data| {
         input_future = try io.concurrent(writeInput, .{ io, child.stdin.?, data });
@@ -37,12 +56,18 @@ fn runWithEnvironment(io: std.Io, a: std.mem.Allocator, argv: []const []const u8
     try multi.checkAnyError();
     if (input_future) |*future| try future.await(io);
     const term = try child.wait(io);
+    var exit_code: ?u32 = switch (term) {
+        .exited => |code| code,
+        else => null,
+    };
+    if (builtin.os.tag == .windows) {
+        var full_code: u32 = undefined;
+        if (GetExitCodeProcess(exit_handle.?, &full_code) == .FALSE) return error.ProcessStatusUnavailable;
+        exit_code = full_code;
+    }
     const stdout = try multi.toOwnedSlice(0);
     errdefer a.free(stdout);
-    return .{ .stdout = stdout, .stderr = try multi.toOwnedSlice(1), .ok = switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    } };
+    return .{ .stdout = stdout, .stderr = try multi.toOwnedSlice(1), .ok = exit_code == 0, .exit_code = exit_code };
 }
 /// Starts a desktop launcher without pipes, so the application it opens cannot
 /// hold them and stall the caller. Returns whether the launcher succeeded.
@@ -140,4 +165,12 @@ test "remote URLs reject helper command execution and option injection" {
     try std.testing.expect(!validRemote("--upload-pack=bad"));
     try std.testing.expect(validRemote("https://github.com/owner/repo.git"));
     try std.testing.expect(validRemote("git@example.org:owner/repo.git"));
+}
+test "Windows command failures retain full HRESULTs even when the low byte is zero" {
+    if (builtin.os.tag != .windows) return;
+    const a = std.testing.allocator;
+    const result = try run(std.testing.io, a, &.{ "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "[Environment]::Exit(-1978334976)" }, null, null);
+    defer result.deinit(a);
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqual(@as(?u32, 0x8A150100), result.exit_code);
 }

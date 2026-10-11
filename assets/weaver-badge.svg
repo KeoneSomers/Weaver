@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30">
+  <title>Weaver</title>
+  <rect id="border" x="1" y="1" width="28" height="28" rx="5.5" fill="#484850"/>
+  <rect id="tile" x="2" y="2" width="26" height="26" rx="4.5" fill="#000000"/>
+  <polygon points="8.7,18.9 13.8,14.8 13.8,17.4 8.7,21.3" fill="#85888F"/>
+  <polygon points="16.2,18.9 21.3,14.8 21.3,17.4 16.2,21.3" fill="#85888F"/>
+  <rect x="6.3" y="7.8" width="2.5" height="14.4" rx="0.3" fill="#FFFFFF"/>
+  <rect x="13.8" y="7.8" width="2.5" height="14.4" rx="0.3" fill="#FFFFFF"/>
+  <rect x="21.3" y="7.8" width="2.5" height="14.4" rx="0.3" fill="#FFFFFF"/>
+</svg>
