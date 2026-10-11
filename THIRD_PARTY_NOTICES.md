@@ -8,4 +8,4 @@
 - [Native File Dialog Extended](https://github.com/btzy/nativefiledialog-extended/tree/v1.4.1), zlib license. Installed as `licenses/NativeFileDialog.txt`.
 - Knots dependencies include AccessKit, Vulkan bindings/headers, TrueType, zig-objc, wgpu and Windows bindings. The release pipeline collects downloaded dependency license texts with `scripts/collect-licenses.py` and includes them in installer bundles.
 
-Before publishing, choose Weaver's application license and publish the reproducible source/build information for libgit2. libgit2 v1.9.7 source is available at https://github.com/libgit2/libgit2/tree/v1.9.7; `build/libgit2.zig` documents its build options.
+Weaver itself is MIT licensed; see `LICENSE`. libgit2 v1.9.7 source is available at https://github.com/libgit2/libgit2/tree/v1.9.7; `build/libgit2.zig` documents its build options.

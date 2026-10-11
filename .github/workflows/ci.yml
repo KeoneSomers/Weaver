@@ -1,0 +1,114 @@
+name: Build, test and release
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+# A newer push supersedes an older run, so the rolling release never goes backwards.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-aarch64
+          - os: macos-15-intel
+            platform: macos-x86_64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+      - name: Version
+        run: |
+          base="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon | head -n 1)"
+          test -n "$base"
+          echo "BASE_VERSION=$base" >> "$GITHUB_ENV"
+          echo "VERSION=$base-build.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "PACKAGE=Weaver-${{ matrix.platform }}" >> "$GITHUB_ENV"
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev git-lfs
+      - name: Backend tests
+        run: zig build test -Dheadless=true
+      - name: UI tests
+        run: zig build test-ui
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe "-Dversion=$VERSION"
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = "dist/$env:PACKAGE"
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item -LiteralPath zig-out/bin/weaver.exe -Destination $bundle
+          Copy-Item -LiteralPath zig-out/licenses -Destination $bundle -Recurse
+          Compress-Archive -LiteralPath $bundle -DestinationPath "$bundle.zip"
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "dist/$PACKAGE"
+          cp -R zig-out/bin zig-out/share zig-out/licenses "dist/$PACKAGE/"
+          tar -C dist -czf "dist/$PACKAGE.tar.gz" "$PACKAGE"
+      # Unsigned: the bundle gets an ad-hoc signature so it can run on Apple Silicon.
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: |
+          app=dist/Weaver.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp zig-out/bin/weaver "$app/Contents/MacOS/"
+          cp packaging/macos/Info.plist "$app/Contents/"
+          cp assets/weaver.icns "$app/Contents/Resources/"
+          cp -R zig-out/licenses "$app/Contents/Resources/"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $BASE_VERSION" "$app/Contents/Info.plist"
+          codesign --force --deep --sign - "$app"
+          # hdiutil intermittently reports "Resource busy" on hosted runners.
+          for attempt in 1 2 3; do
+            hdiutil create -volname Weaver -srcfolder "$app" -ov -format UDZO "dist/$PACKAGE.dmg" && break
+            test "$attempt" -lt 3 && sleep 5
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/Weaver-*.zip
+            dist/Weaver-*.tar.gz
+            dist/Weaver-*.dmg
+          if-no-files-found: error
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          base="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon | head -n 1)"
+          version="$base-build.$GITHUB_RUN_NUMBER"
+          (cd dist && sha256sum Weaver-* > SHA256SUMS.txt)
+          # One rolling release: replace the previous build and move its tag to this commit.
+          gh release delete rolling --cleanup-tag --yes || true
+          gh release create rolling dist/* --target "$GITHUB_SHA" --latest --title "Weaver $version" --notes "Automatic build of \`main\` at $GITHUB_SHA."

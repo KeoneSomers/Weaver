@@ -1,6 +1,6 @@
 # Releases and updates
 
-> The GitHub Actions workflows (`.github/workflows/ci.yml` and `release.yml`) have been removed, so pushes and tags no longer build anything. The pipeline described below is the design to restore from Git history when automated releases are wanted.
+> `.github/workflows/ci.yml` builds and tests every push and pull request on Windows, macOS and Linux. Every push to `main` also replaces a single unsigned rolling GitHub release (tag `rolling`, titled `Weaver <version>-build.<run number>`), with a Windows zip, macOS disk images for Apple Silicon and Intel, a Linux tarball and `SHA256SUMS.txt`. The version comes from `build.zig.zon`. The signed release workflow (`release.yml`) has been removed; the signing, installer and update-manifest pipeline described below is the design to restore from Git history when signed releases are wanted.
 
 Create a GitHub repository and enable Actions. Protect the `release` environment and set these public variables:
 
