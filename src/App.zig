@@ -145,6 +145,27 @@ const Result = struct {
         self.arena.deinit();
     }
 };
+/// Knots destroys completions still queued at shutdown without releasing their
+/// results. Workers write into a slot Weaver tracks until delivery, so deinit
+/// can release whatever never arrived.
+const Delivery = struct {
+    value: Value = .pending,
+    const Value = union(enum) { pending, job: Result, git_health: GitHealthResult };
+    fn Dispatch(comptime field: std.meta.Tag(Value), comptime work_fn: anytype, comptime done_fn: anytype) type {
+        const JobPtr = @typeInfo(@TypeOf(work_fn)).@"fn".param_types[2].?;
+        return struct {
+            fn run(io: std.Io, a: std.mem.Allocator, job: JobPtr, delivery: *Delivery) *Delivery {
+                delivery.value = @unionInit(Value, @tagName(field), work_fn(io, a, job));
+                return delivery;
+            }
+            fn deliver(view: *knots.View, ctx: *ui.Frame, delivery: *Delivery) !void {
+                const value = @field(delivery.value, @tagName(field));
+                of(view).untrack(delivery);
+                try done_fn(view, ctx, value);
+            }
+        };
+    }
+};
 
 io: std.Io,
 a: std.mem.Allocator,
@@ -190,6 +211,7 @@ busy: bool = false,
 active_operation: ?model.Operation = null,
 clear_commit_message: bool = false,
 picker_open: bool = false,
+deliveries: std.ArrayList(*Delivery) = .empty,
 pending_picker: ?struct { kind: file_picker.Kind, input: *std.ArrayList(u8), repository_relative: bool, title: []const u8 } = null,
 notice: []const u8 = "Ready. Add a local repository or clone a remote to begin.",
 notice_owned: bool = false,
@@ -297,6 +319,14 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
 pub fn deinit(self: *Self) void {
     // App shutdown joins/cancels background tasks before freeing their state.
     self.app.deinit();
+    for (self.deliveries.items) |delivery| {
+        switch (delivery.value) {
+            .pending => {},
+            inline else => |*value| value.deinit(),
+        }
+        self.a.destroy(delivery);
+    }
+    self.deliveries.deinit(self.a);
     if (self.git_health) |*health| health.deinit();
     self.a.free(self.git_install_report);
     self.app_icon.deinit();
@@ -328,16 +358,22 @@ pub fn start(self: *Self) !void {
         } else self.message("This workspace needs a version-control provider that is not installed.", true);
     }
     if (self.capture_path == null or self.capture_delay_ns > 0) try self.scheduleRefresh();
-    try self.app.startWithIdle(frame, idle);
+    try self.app.start(frame);
 }
-fn idle(app: *knots.App) !void {
-    const self: *Self = @alignCast(@fieldParentPtr("app", app));
-    if (self.pending_picker) |request_value| {
-        self.pending_picker = null;
-        defer self.picker_open = false;
-        try self.showPicker(request_value.kind, request_value.input, request_value.repository_relative, request_value.title);
-        app.main_viewport.window.requestFrame();
-    }
+/// Runs a background job and delivers its result on the UI thread.
+fn dispatchTracked(self: *Self, comptime field: std.meta.Tag(Delivery.Value), comptime work_fn: anytype, comptime done_fn: anytype, job: anytype) !void {
+    try self.deliveries.ensureUnusedCapacity(self.a, 1);
+    const delivery = try self.a.create(Delivery);
+    delivery.* = .{};
+    self.deliveries.appendAssumeCapacity(delivery);
+    errdefer self.untrack(delivery);
+    const D = Delivery.Dispatch(field, work_fn, done_fn);
+    try self.app.dispatch(self.app.main_viewport.id, D.run, .{ self.io, self.a, job, delivery }, D.deliver);
+}
+fn untrack(self: *Self, delivery: *Delivery) void {
+    const index = std.mem.indexOfScalar(*Delivery, self.deliveries.items, delivery).?;
+    _ = self.deliveries.swapRemove(index);
+    self.a.destroy(delivery);
 }
 fn scheduleRefresh(self: *Self) !void {
     try self.app.dispatch(self.app.main_viewport.id, refreshWait, .{ self.io, &self.watcher, &self.watch_epoch, self.watch_epoch.load(.acquire) }, refreshTick);
@@ -418,7 +454,7 @@ fn launchGitHealth(self: *Self, install: ?git_runtime.Snapshot, updates: bool) !
         self.git_install_report = "";
         self.git_install_failed = false;
     }
-    try self.app.dispatchWithCleanup(self.app.main_viewport.id, gitHealthWork, .{ self.io, self.a, job }, gitHealthDone, GitHealthResult.deinit);
+    try self.dispatchTracked(.git_health, gitHealthWork, gitHealthDone, job);
     self.git_health_busy = true;
     self.git_installing = install != null;
 }
@@ -588,7 +624,7 @@ fn launchInternal(self: *Self, kind: JobKind, path_value: []const u8, req: model
             try self.fetch_attempts.put(owned_path, timestamp);
         }
     }
-    try self.app.dispatchWithCleanup(self.app.main_viewport.id, work, .{ self.io, self.a, job }, done, Result.deinit);
+    try self.dispatchTracked(.job, work, done, job);
     if (background and req.operation == .fetch) {
         self.fetch_busy = true;
     } else if (background) {
@@ -610,7 +646,7 @@ fn launchRead(self: *Self, kind: JobKind, repo_path: []const u8, files_value: []
     const copies = try a.alloc(model.File, files_value.len);
     for (files_value, copies) |f, *copy| copy.* = .{ .path = try a.dupe(u8, f.path), .old_path = try a.dupe(u8, f.old_path), .status = try a.dupe(u8, f.status), .staged = f.staged };
     job.files = copies;
-    try self.app.dispatchWithCleanup(self.app.main_viewport.id, work, .{ self.io, self.a, job }, done, Result.deinit);
+    try self.dispatchTracked(.job, work, done, job);
     if (kind == .preview) {
         self.preview_busy = true;
         self.preview_quiet = quiet;
@@ -1239,6 +1275,14 @@ fn menuSeparator(ctx: *ui.Frame, key: []const u8) !void {
 }
 fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     const self = of(view);
+    // Knots defers frames requested while this one is active, so the native
+    // modal's own event loop cannot re-enter rendering.
+    if (self.pending_picker) |request_value| {
+        self.pending_picker = null;
+        defer self.picker_open = false;
+        try self.showPicker(request_value.kind, request_value.input, request_value.repository_relative, request_value.title);
+        ctx.requestRedraw();
+    }
     if (self.capture_path == null or self.capture_delay_ns > 0) try self.automaticFetch();
     if (self.refresh_pending and !self.background_busy and !self.counts_busy and !self.preview_busy and !self.preview_pending and
         self.config.data.auto_refresh and self.available() and !self.confirm_open and !self.add_open and self.page == .changes and self.snapshot != null)
@@ -1249,7 +1293,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
         }
     }
     // Dispatch from the frame: continuously animated Windows frames can keep
-    // the native message batch open and postpone the main-thread idle hook.
+    // the native message batch open and postpone work between event batches.
     if (self.preview_pending and self.available() and self.page == .changes) {
         self.preview_wait_ns += ctx.input().delta_ns;
         if (self.preview_wait_ns >= 75 * std.time.ns_per_ms) {
@@ -3061,8 +3105,9 @@ fn failureDialog(self: *Self, ctx: *ui.Frame) !void {
 fn browse(self: *Self, kind: file_picker.Kind, input: *std.ArrayList(u8), repository_relative: bool, title: []const u8) !void {
     if (self.busy or self.picker_open) return;
     self.picker_open = true;
+    // Shown at the start of the next frame, before any UI is built.
     self.pending_picker = .{ .kind = kind, .input = input, .repository_relative = repository_relative, .title = title };
-    self.app.main_viewport.window.postEmptyEvent();
+    self.app.main_viewport.window.requestFrame();
 }
 fn showPicker(self: *Self, kind: file_picker.Kind, input: *std.ArrayList(u8), repository_relative: bool, title: []const u8) !void {
     const handle = self.app.main_viewport.window.getWindowHandle();

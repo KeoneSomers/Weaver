@@ -4,7 +4,24 @@
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x83506f91aa85b413,
     .dependencies = .{
-        .knots = .{ .path = "vendor/knots", .lazy = true },
+        .libgit2 = .{
+            .url = "https://github.com/libgit2/libgit2/archive/refs/tags/v1.9.7.tar.gz",
+            .hash = "N-V-__8AAPE7NgGzXiYp17A2YYEYpVRbRzgNqovmU-BWmr8z",
+        },
+        .nfd = .{
+            .url = "https://github.com/btzy/nativefiledialog-extended/archive/refs/tags/v1.4.1.tar.gz",
+            .hash = "N-V-__8AAEXCCwCK8Vr9EDrBMGx0bV1Lt7QiWcrFZ3X2DA75",
+        },
+        .wayland_protocols = .{
+            .url = "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.45/downloads/wayland-protocols-1.45.tar.xz",
+            .hash = "N-V-__8AAIKCDgBX6hRMzFmvC-WAwrOH_ewvZgAzPGbBvavk",
+            .lazy = true,
+        },
+        .knots = .{
+            .url = "git+https://github.com/knots-ui/knots.git#ccca6fc8b411da18edf52b7db1b5262c8b099e83",
+            .hash = "knots-0.4.0-g0L13bE9MgBFYMasEXHDSo7JrAqHHfYTiaxqb9nXB8fu",
+            .lazy = true,
+        },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "patches", "vendor/knots", "vendor/nfd" },
+    .paths = .{ "build.zig", "build.zig.zon", "build", "src", "assets" },
 }

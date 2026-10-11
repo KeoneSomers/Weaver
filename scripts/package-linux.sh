@@ -1,9 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 version="$1"
-mkdir -p dist/AppDir/usr/bin dist/AppDir/usr/lib dist/AppDir/usr/share/applications dist/AppDir/usr/share/icons
+mkdir -p dist/AppDir/usr/bin dist/AppDir/usr/share/applications dist/AppDir/usr/share/icons
 cp zig-out/bin/weaver dist/AppDir/usr/bin/
-cp -L .tools/git2/lib/libgit2.so* dist/AppDir/usr/lib/
 cp packaging/linux/weaver.desktop dist/AppDir/
 cp packaging/linux/weaver.desktop dist/AppDir/usr/share/applications/
 cp assets/weaver.png dist/AppDir/weaver.png
@@ -15,7 +14,6 @@ cp -R zig-out/licenses dist/AppDir/usr/share-weaver-licenses
 cat > dist/AppDir/AppRun <<'EOF'
 #!/usr/bin/env sh
 HERE=$(dirname "$(readlink -f "$0")")
-export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 exec "$HERE/usr/bin/weaver" "$@"
 EOF

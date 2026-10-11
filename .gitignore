@@ -1,8 +1,6 @@
 .zig-cache/
 zig-pkg/
 zig-out/
-.tools/
-vendor/
 dist/
 *.log
 *.pem

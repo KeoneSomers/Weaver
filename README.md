@@ -6,29 +6,18 @@ A native version-control desktop app written in **Zig**, using **KnotsUI** for t
 
 ## Windows preview
 
-Extract `dist/Weaver-0.1.0-preview-windows-x86_64.zip` and run `weaver.exe` inside its folder. Keep `libgit2.dll` beside the executable. Install Git, Git LFS and curl, then add a repository in Weaver. This portable preview is unsigned; the release pipeline and stable installer bootstrap need your signing and GitHub configuration before public distribution.
+Extract `dist/Weaver-0.1.0-preview-windows-x86_64.zip` and run `weaver.exe` inside its folder. Install Git, Git LFS and curl, then add a repository in Weaver. This portable preview is unsigned; the release pipeline and stable installer bootstrap need your signing and GitHub configuration before public distribution.
 
 ## Build
 
-Pinned dependencies: Zig **0.17.0**, KnotsUI `88bd83b4dc79f3178c9ca5345d5cb3c1c536f58f`, libgit2 **1.9.7**, Native File Dialog Extended **1.4.1**. Knots follows Zig development; keep the compiler and library revisions together. The bootstrap scripts fetch source dependencies and apply the checked-in Knots patches for native modal dialogs outside draw callbacks, cleanup of background results discarded during shutdown, and stable hover/context-menu hit targets while rebuilding the UI. Vendored checkouts and downloaded tools are ignored by Git.
-
-Windows: install Zig with `zvm install 0.17.0`, CMake and Ninja, then:
-
-```powershell
-./scripts/bootstrap.ps1 -Zig "$env:USERPROFILE/.zvm/0.17.0/zig.exe"
-& "$env:USERPROFILE/.zvm/0.17.0/zig.exe" build
-& "$env:USERPROFILE/.zvm/0.17.0/zig.exe" build run
-```
-
-Linux: one command installs the system packages (apt, dnf, pacman or zypper, using sudo), downloads the pinned Zig into `.tools` if it is not already on `PATH`, fetches the source dependencies and builds:
+Requires Zig **0.17.0**. KnotsUI, libgit2 **1.9.7**, Native File Dialog Extended **1.4.1** and their dependencies are pinned in `build.zig.zon`; `zig build` fetches them and compiles libgit2 and the file dialog from source into a self-contained executable. Knots follows Zig development; keep the compiler and library revisions together. Update a dependency with `zig fetch --save=<name> <url>`.
 
 ```sh
-sh scripts/setup-linux.sh
+zig build
+zig build run
 ```
 
-It prints the command to run Weaver when it finishes. Set `SKIP_PACKAGES=1` to install the packages yourself: a C/C++ compiler, CMake, `pkg-config`, and the development packages for OpenSSL, Wayland, `wayland-protocols`, xkbcommon and D-Bus. Running Weaver needs a Wayland session, a desktop portal with a FileChooser backend, and a Vulkan 1.3 driver.
-
-macOS uses WebGPU. Run `sh scripts/bootstrap.sh`, then `zig build` and `zig build run`.
+Linux additionally needs `pkg-config`, `wayland-scanner`, and the development packages for Wayland, `wayland-protocols`, xkbcommon and D-Bus. Running Weaver needs a Wayland session, a desktop portal with a FileChooser backend, and a Vulkan 1.3 driver. macOS uses WebGPU.
 
 Runtime requirements: Git, curl, and Git LFS for LFS repositories. Existing Git credential helpers, SSH configuration and agents remain available. GitHub sign-in needs Git Credential Manager, which Git for Windows includes; install it separately on macOS and Linux. Linux secure GitHub storage requires `secret-tool`. Tokens never go in settings or remote URLs.
 

@@ -2,7 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const git = @import("git.zig");
-const c = @import("libgit2.zig");
+const c = @import("git2");
 const windows = std.os.windows;
 extern "kernel32" fn WaitForSingleObject(windows.HANDLE, windows.DWORD) callconv(.winapi) windows.DWORD;
 const Overlapped = extern struct { internal: usize = 0, internal_high: usize = 0, offset: u32 = 0, offset_high: u32 = 0, event: ?windows.HANDLE = null };

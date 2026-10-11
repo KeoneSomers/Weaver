@@ -5,7 +5,7 @@ import shutil
 root = Path(__file__).resolve().parents[1]
 destination = root / "zig-out" / "licenses" / "dependencies"
 count = 0
-for source_root in (root / "zig-pkg", root / "vendor" / "libgit2" / "deps", root / "vendor" / "nfd" / "3ps" / "wayland-protocols"):
+for source_root in (root / "zig-pkg",):
     if not source_root.exists():
         continue
     for source in sorted(source_root.rglob("*")):
