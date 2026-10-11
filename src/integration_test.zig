@@ -207,7 +207,22 @@ test "native watch detects nested edits, same-status content, deletion and exter
     defer before.deinit();
     var old_preview = try provider.preview(io, a, root, before.files[0]);
     defer old_preview.deinit();
-    try std.testing.expect(!try watcher.poll());
+    // Windows may report the first read after a write once, when it settles the
+    // file's directory entry. Only a read that is reported every time would
+    // keep automatic refreshes going, so that is what must never happen.
+    try drainWatch(&watcher);
+    {
+        var again = try provider.scan(io, a, root);
+        defer again.deinit();
+        var again_preview = try provider.preview(io, a, root, again.files[0]);
+        defer again_preview.deinit();
+    }
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    // Name the offending path if this ever fails.
+    std.testing.log_level = .debug;
+    const fed = try watcher.poll();
+    std.testing.log_level = .warn;
+    try std.testing.expect(!fed);
     try temp.dir.writeFile(io, .{ .sub_path = "nested/café/file.txt", .data = "after\n" });
     try awaitWatch(&watcher);
     var after = try provider.scan(io, a, root);

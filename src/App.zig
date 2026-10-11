@@ -15,6 +15,7 @@ const themes = @import("themes.zig");
 const icons = @import("icons.zig");
 const AppIcon = @import("app_icon.zig");
 const titlebar = @import("titlebar.zig");
+const window_place = @import("window_place.zig");
 const diff = @import("diff.zig");
 const file_picker = @import("file_picker.zig");
 const path_selection = @import("path_selection.zig");
@@ -312,13 +313,14 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
     var config = try config_mod.Config.init(io, a, env);
     errdefer config.deinit();
     try AppIcon.prepare();
-    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1440, .height = 900, .title = "Weaver", .decorations = .none }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
+    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1520, .height = 720, .title = "Weaver", .decorations = .none }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
     var app_icon: AppIcon = .{};
     errdefer {
         app.deinit();
         app_icon.deinit();
     }
     app_icon = try AppIcon.init(&app.main_viewport.window);
+    window_place.center(&app.main_viewport.window);
     try app.main_viewport.ui_ctx.ui.font.addFace("mono", @embedFile("mono_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("devicon", @embedFile("file_icon_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("lucide", @embedFile("toolbar_icon_font"));

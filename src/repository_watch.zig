@@ -119,7 +119,10 @@ pub const Watcher = struct {
                             }
                             const name = try std.unicode.utf16LeToUtf8Alloc(self.allocator, @alignCast(std.mem.bytesAsSlice(u16, record[12..][0..length])));
                             defer self.allocator.free(name);
-                            if (relevant(name, e.metadata)) changed = true;
+                            if (relevant(name, e.metadata)) {
+                                std.log.scoped(.repository_watch).debug("action {d}: {s}", .{ std.mem.readInt(u32, record[4..8], .little), name });
+                                changed = true;
+                            }
                             if (next == 0) break;
                             if (next < 12 or next % 4 != 0 or next > record.len) {
                                 changed = true;

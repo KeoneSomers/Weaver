@@ -4,17 +4,8 @@ Weaver is a fast, native Git desktop app for Windows, macOS and Linux. It is wri
 
 ![Weaver showing staged and unstaged changes beside a highlighted diff](docs/screenshots/changes.png)
 
-[![Latest build](https://img.shields.io/github/release-date/KeoneSomers/Weaver?label=latest%20build)](https://github.com/KeoneSomers/Weaver/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/KeoneSomers/Weaver/total)](https://github.com/KeoneSomers/Weaver/releases)
 [![Build and test](https://github.com/KeoneSomers/Weaver/actions/workflows/ci.yml/badge.svg)](https://github.com/KeoneSomers/Weaver/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/github/license/KeoneSomers/Weaver)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver/commits/main)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver/graphs/commit-activity)
-[![Contributors](https://img.shields.io/github/contributors/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver/graphs/contributors)
-[![Stars](https://img.shields.io/github/stars/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver/stargazers)
-[![Open issues](https://img.shields.io/github/issues/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver/issues)
-[![Top language](https://img.shields.io/github/languages/top/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver)
-[![Code size](https://img.shields.io/github/languages/code-size/KeoneSomers/Weaver)](https://github.com/KeoneSomers/Weaver)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Zig 0.17.0](https://img.shields.io/badge/Zig-0.17.0-f7a41d?logo=zig&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
