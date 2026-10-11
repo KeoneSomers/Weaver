@@ -18,8 +18,8 @@
             .lazy = true,
         },
         .knots = .{
-            .url = "git+https://github.com/knots-ui/knots.git#ccca6fc8b411da18edf52b7db1b5262c8b099e83",
-            .hash = "knots-0.4.0-g0L13bE9MgBFYMasEXHDSo7JrAqHHfYTiaxqb9nXB8fu",
+            .url = "git+https://github.com/knots-ui/knots.git#20a0c8d8f629e8ca017014bd35ca969e710e8739",
+            .hash = "knots-0.4.0-g0L13Xe9MgBObE9ovW6g80GMxMdQBNVTy9gLjji8r0VB",
             .lazy = true,
         },
     },

@@ -312,14 +312,13 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
     var config = try config_mod.Config.init(io, a, env);
     errdefer config.deinit();
     try AppIcon.prepare();
-    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1440, .height = 900, .title = "Weaver" }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
+    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1440, .height = 900, .title = "Weaver", .decorations = .none }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
     var app_icon: AppIcon = .{};
     errdefer {
         app.deinit();
         app_icon.deinit();
     }
     app_icon = try AppIcon.init(&app.main_viewport.window);
-    titlebar.install(&app.main_viewport.window);
     try app.main_viewport.ui_ctx.ui.font.addFace("mono", @embedFile("mono_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("devicon", @embedFile("file_icon_font"));
     try app.main_viewport.ui_ctx.ui.font.addFace("lucide", @embedFile("toolbar_icon_font"));
@@ -1393,7 +1392,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
         if (std.fs.path.dirname(file_path)) |directory|
             try ctx.e(Text{ .key = .str("title-directory"), .content = try diff.safeText(ctx.arena(), directory), .selectable = false, .style = &.{ .wrap = false, .overflow = .hidden, .foreground = .dimmed, .font_size = .xs } });
     }
-    try titlebar.close(ctx, &self.app.main_viewport.window, self.lucide);
+    try titlebar.close(ctx);
     const root = Rect{ .key = .str("root"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .font_size = .sm, .padding = .init(0, root_padding, root_padding, root_padding), .gap = 8 } };
     _ = try root.open(ctx);
     const body = Rect{ .key = .str("body"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row } };
