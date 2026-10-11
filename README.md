@@ -147,7 +147,7 @@ Weaver needs a **Wayland** session (KnotsUI has no X11 backend yet), a **Vulkan 
 ### Troubleshooting
 
 - **Zig reports a version mismatch or unfamiliar compile errors.** Check `zig version` prints `0.17.0`.
-- **A dependency fails to download.** The first build needs network access to GitHub and gitlab.freedesktop.org. Run `zig build` again to retry.
+- **A dependency fails to download** (for example `invalid HTTP response: HttpConnectionClosing`). The first build downloads several large packages from GitHub and gitlab.freedesktop.org, and a transfer sometimes drops. Run `zig build` again; it continues from what it already has.
 - **Linux: `wayland-scanner` or a `.pc` file is not found.** One of the packages above is missing.
 - **Linux: the window does not open.** Check you are in a Wayland session (`echo $XDG_SESSION_TYPE`) and that `vulkaninfo` reports Vulkan 1.3.
 
