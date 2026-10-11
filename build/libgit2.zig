@@ -103,7 +103,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     mod.addCSourceFiles(.{ .root = src.path("."), .files = &pcre2_sources, .flags = &(pcre2_static ++ .{ "-DHAVE_CONFIG_H", "-DPCRE2_CODE_UNIT_WIDTH=8" }) });
 
     switch (os) {
-        .windows => for ([_][]const u8{ "ws2_32", "secur32", "advapi32", "ole32", "rpcrt4" }) |name| mod.linkSystemLibrary(name, .{}),
+        .windows => for ([_][]const u8{ "ws2_32", "secur32", "advapi32", "ole32", "rpcrt4" }) |name| mod.linkSystemLibrary(name, .{ .use_pkg_config = .no }),
         .macos => {
             mod.linkSystemLibrary("iconv", .{});
             mod.linkFramework("CoreFoundation", .{});

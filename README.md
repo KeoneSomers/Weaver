@@ -28,7 +28,6 @@ These links always point at the newest build; the [latest release](https://githu
 | --- | --- | --- |
 | Windows (x64) | [`Weaver-windows-x86_64.zip`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-windows-x86_64.zip) | Extract the folder and run `weaver.exe`. |
 | macOS (Apple Silicon) | [`Weaver-macos-aarch64.dmg`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-macos-aarch64.dmg) | Open the disk image and drag Weaver to Applications. |
-| macOS (Intel) | [`Weaver-macos-x86_64.dmg`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-macos-x86_64.dmg) | Open the disk image and drag Weaver to Applications. |
 | Linux (x64, Wayland) | [`Weaver-linux-x86_64.tar.gz`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-linux-x86_64.tar.gz) | Extract and run `bin/weaver`. |
 
 The downloads are not code-signed yet, so your system will warn you the first time:
@@ -115,6 +114,8 @@ No Visual Studio or other compiler is needed.
 
 ### macOS
 
+Apple Silicon only; Intel Macs are not supported.
+
 1. Install the Xcode Command Line Tools, which provide Git and the system frameworks:
 
    ```sh
@@ -183,6 +184,7 @@ More documentation:
 
 - Downloads are not code-signed, and there is no installer or automatic update yet.
 - Linux needs Wayland; there is no X11 backend.
+- macOS needs Apple Silicon; KnotsUI's GPU and scripting dependencies have no Intel Mac builds.
 - No complex text shaping or IME composition yet.
 - History shows the latest 300 commits.
 - Text previews are limited to 2 MiB and 25,000 lines; there are no image diffs.

@@ -169,6 +169,18 @@ fn awaitWatch(watcher: *@import("repository_watch.zig").Watcher) !void {
     return error.MissingRepositoryNotification;
 }
 
+/// Windows reports size and write-time changes only once cached data reaches
+/// the disk, so a burst can trail its write by a variable delay.
+fn drainWatch(watcher: *@import("repository_watch.zig").Watcher) !void {
+    var quiet: u32 = 0;
+    for (0..500) |_| {
+        quiet = if (try watcher.poll()) 0 else quiet + 1;
+        if (quiet >= 50) return;
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+    return error.RepositoryNotificationsNeverSettled;
+}
+
 test "native watch detects nested edits, same-status content, deletion and external worktree refs" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     try git.init();
@@ -190,8 +202,7 @@ test "native watch detects nested edits, same-status content, deletion and exter
     try temp.dir.writeFile(io, .{ .sub_path = "nested/café/file.txt", .data = "before\n" });
     try std.testing.expectEqual(@import("repository_watch.zig").Signal.changed, wait.await(io));
     // Drain the rest of the burst, then prove Git's read does not feed the watch.
-    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
-    _ = try watcher.poll();
+    try drainWatch(&watcher);
     var before = try provider.scan(io, a, root);
     defer before.deinit();
     var old_preview = try provider.preview(io, a, root, before.files[0]);

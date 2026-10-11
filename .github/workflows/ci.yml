@@ -21,8 +21,6 @@ jobs:
             platform: linux-x86_64
           - os: macos-15
             platform: macos-aarch64
-          - os: macos-15-intel
-            platform: macos-x86_64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -42,6 +40,14 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev git-lfs
+      # Dependency downloads occasionally drop mid-transfer; fetched packages are kept between attempts.
+      - name: Fetch dependencies
+        run: |
+          for attempt in 1 2 3 4 5; do
+            zig build --fetch && exit 0
+            sleep 15
+          done
+          exit 1
       - name: Backend tests
         run: zig build test -Dheadless=true
       - name: UI tests

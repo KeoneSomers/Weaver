@@ -11,7 +11,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     switch (target.result.os.tag) {
         .windows => {
             mod.addCSourceFile(.{ .file = src.path("src/nfd_win.cpp"), .flags = &.{ "-std=c++11", "-fno-exceptions", "-fno-rtti", "-DNFD_OVERRIDE_RECENT_WITH_DEFAULT" } });
-            for ([_][]const u8{ "ole32", "shell32", "uuid" }) |name| mod.linkSystemLibrary(name, .{});
+            for ([_][]const u8{ "ole32", "shell32", "uuid" }) |name| mod.linkSystemLibrary(name, .{ .use_pkg_config = .no });
         },
         .macos => {
             mod.addCSourceFile(.{ .file = src.path("src/nfd_cocoa.m"), .flags = &.{"-DNFD_MACOS_ALLOWEDCONTENTTYPES=1"} });
