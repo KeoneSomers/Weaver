@@ -392,6 +392,56 @@ test "partial staging and reverse staging preserve other hunks and working files
     try std.testing.expectEqualStrings(changed, disk);
 }
 
+test "branches are created from a start point, renamed, and deleted only by force when unmerged" {
+    try git.init();
+    defer git.shutdown();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = buffer[0..try temp.dir.realPath(io, &buffer)];
+    try command(path, &.{ "init", "--initial-branch=main" });
+    try command(path, &.{ "config", "user.name", "Weaver Test" });
+    try command(path, &.{ "config", "user.email", "test@example.invalid" });
+    try command(path, &.{ "config", "commit.gpgsign", "false" });
+    try command(path, &.{ "config", "core.autocrlf", "false" });
+    try command(path, &.{ "config", "core.hooksPath", ".git/hooks" });
+    try temp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "base\n" });
+    try command(path, &.{ "add", "--all" });
+    try command(path, &.{ "commit", "-m", "Base" });
+    try command(path, &.{ "switch", "-c", "feature" });
+    try temp.dir.writeFile(io, .{ .sub_path = "file.txt", .data = "feature\n" });
+    try command(path, &.{ "commit", "-am", "Feature" });
+    try command(path, &.{ "switch", "main" });
+    const requests = [_]struct { @import("model.zig").Request, bool }{
+        // Starts at feature rather than at the checked-out main.
+        .{ .{ .operation = .create_branch, .value = "from-feature", .second = "feature" }, true },
+        .{ .{ .operation = .rename_branch, .value = "feature", .second = "renamed" }, true },
+        .{ .{ .operation = .rename_branch, .value = "renamed", .second = "main" }, false },
+        .{ .{ .operation = .rename_branch, .value = "renamed", .second = "--force" }, false },
+        .{ .{ .operation = .switch_branch, .value = "main" }, true },
+        .{ .{ .operation = .delete_branch, .value = "from-feature" }, false },
+        .{ .{ .operation = .force_delete_branch, .value = "from-feature" }, true },
+    };
+    for (requests) |entry| {
+        const result = provider.execute(io, a, path, entry[0]) catch |err| {
+            try std.testing.expect(!entry[1] and err == error.InvalidArgument);
+            continue;
+        };
+        defer result.deinit(a);
+        try std.testing.expectEqual(entry[1], result.ok);
+        if (entry[0].operation == .create_branch) {
+            const disk = try temp.dir.readFileAlloc(io, "file.txt", a, .limited(4096));
+            defer a.free(disk);
+            try std.testing.expectEqualStrings("feature\n", disk);
+        }
+    }
+    var snapshot = try provider.load(io, a, path);
+    defer snapshot.deinit();
+    try std.testing.expectEqualStrings("main", snapshot.branch);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.branches.len);
+    for (snapshot.branches) |branch| try std.testing.expect(std.mem.eql(u8, branch, "main") or std.mem.eql(u8, branch, "renamed"));
+}
+
 test "merge conflicts remain visible and choosing a side stages only the resolved file" {
     try git.init();
     defer git.shutdown();

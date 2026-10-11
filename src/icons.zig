@@ -55,6 +55,11 @@ pub const Menu = enum {
     move_top,
     move_bottom,
     remove,
+    switch_branch,
+    new_branch,
+    merge,
+    rebase,
+    publish,
 
     pub fn glyph(self: Menu) []const u8 {
         return switch (self) {
@@ -82,6 +87,11 @@ pub const Menu = enum {
             .move_top => "\u{e45f}", // arrow-up-to-line
             .move_bottom => "\u{e459}", // arrow-down-to-line
             .remove => "\u{e18d}", // trash-2
+            .switch_branch => "\u{e249}", // arrow-left-right
+            .new_branch => "\u{e1f3}", // git-branch-plus
+            .merge => "\u{e0e7}", // git-merge
+            .rebase => "\u{e35c}", // git-compare
+            .publish => "\u{e095}", // cloud-upload
         };
     }
 };

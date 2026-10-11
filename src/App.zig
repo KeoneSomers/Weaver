@@ -41,6 +41,16 @@ const root_padding: f32 = 12;
 const menu_row_height: f32 = 30;
 const icon_cell: f32 = 38;
 const icon_columns = 13;
+/// Space between panels; the resizable ones are dragged by it.
+const gutter: f32 = 10;
+/// Narrowest the diff may be squeezed by widening the panels beside it.
+const diff_width_min: f32 = 320;
+const branch_select_width: f32 = 200;
+/// On the dropdown layer, below the popup layer of its rows' menus: an overlay
+/// opened inside another on the same layer is covered by the rows after it.
+const branch_popup: ui.Style = .{ .direction = .column, .padding = .all(5), .gap = 4, .layer = .dropdown, .background = .elevated, .foreground = .text, .font_size = .sm, .radius = .{ .fixed = 10 }, .border_width = .all(1), .border_color = .toned };
+/// Git allows longer branch names than a sidebar name.
+const branch_bytes_max = 200;
 const menu_popup: ui.Style = .{ .width = .fixed(256), .gap = 0, .padding = .all(5), .radius = .{ .fixed = 10 }, .border_color = .toned };
 /// Follows the diff font size; virtual rows read it while rendering.
 var diff_row_height: f32 = 22;
@@ -92,8 +102,17 @@ const Drag = struct {
     /// Height held open at each slot between the remaining rows.
     gaps: []f32,
 };
-/// What the name dialog edits. A new group can take a workspace entry with it.
-const NameTarget = union(enum) { repository: usize, group: u32, new_group: ?usize };
+const Panel = enum { sidebar, changes };
+/// A panel edge held by the pointer.
+const Resize = struct {
+    panel: Panel,
+    /// Pointer position minus the panel's width, constant while the edge follows the pointer.
+    grab: f32,
+    /// Width to return to if the drag is cancelled.
+    from: u16,
+};
+/// What the name dialog edits or creates. A new group can take a workspace entry with it.
+const NameTarget = union(enum) { repository: usize, group: u32, new_group: ?usize, new_branch, rename_branch };
 const JobKind = enum { git, open_local, counts, preview, revision, auth_begin, auth_poll, sign_out, update_check, update_download, extension, github_repos };
 const Job = struct {
     environment: ?*const std.process.Environ.Map = null,
@@ -239,9 +258,17 @@ pending_edit: ?SidebarEdit = null,
 /// The row under a held press; it is lifted once the pointer travels.
 drag_press: ?DragPress = null,
 drag: ?Drag = null,
+resize: ?Resize = null,
+/// Where the glow sits along each panel's gutter, kept while it fades out.
+glow_y: [2]f32 = .{ 0, 0 },
 name_open: bool = false,
 name_target: NameTarget = .{ .new_group = null },
 name_input: std.ArrayList(u8) = .empty,
+/// The branch a new one starts from or the one being renamed; empty starts from HEAD.
+name_subject: std.ArrayList(u8) = .empty,
+branches_open: bool = false,
+branch_focus: bool = false,
+branch_filter: std.ArrayList(u8) = .empty,
 /// Put the caret in the name field on the dialog's first frame.
 name_focus: bool = false,
 pending_request: ?model.Request = null,
@@ -341,7 +368,7 @@ pub fn deinit(self: *Self) void {
     self.a.free(self.lucide);
     self.endDrag();
     self.clearDiffRows();
-    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter", "name_input" }) |field| @field(self, field).deinit(self.a);
+    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter", "name_input", "name_subject", "branch_filter" }) |field| @field(self, field).deinit(self.a);
     if (self.notice_owned) self.a.free(self.notice);
     self.a.free(self.failure_text);
     self.registry.deinit();
@@ -1124,6 +1151,43 @@ const ChangeActions = struct {
     }
 };
 
+/// The context menu of a local branch, wherever branches are listed.
+const BranchActions = struct {
+    app: *Self,
+    branch: []const u8,
+
+    pub fn render(self: *const BranchActions, ctx: *ui.Frame) anyerror!void {
+        const app = self.app;
+        const snapshot = app.snapshot orelse return;
+        const branch = self.branch;
+        const ready = app.available() and !app.confirm_open;
+        // Git refuses to delete, merge or rebase onto the branch that is checked out.
+        const other = ready and !std.mem.eql(u8, branch, snapshot.branch);
+        const settled = snapshot.state == .normal;
+        var acted = true;
+        if (try app.menuAction(ctx, "switch", .switch_branch, "Switch to branch", other, false)) {
+            try app.request(ctx, .switch_branch, branch, "");
+        } else if (try app.menuAction(ctx, "branch-from", .new_branch, "New branch from here…", ready, false)) {
+            try app.openBranchDialog(.new_branch, branch);
+        } else if (try separated(ctx, "combine-group") and try app.menuAction(ctx, "merge", .merge, "Merge into current branch", other and settled, false)) {
+            try app.request(ctx, .merge, branch, "");
+        } else if (try app.menuAction(ctx, "rebase", .rebase, "Rebase current branch onto this…", other and settled, false)) {
+            try app.request(ctx, .rebase, branch, "");
+        } else if (try separated(ctx, "name-group") and try app.menuAction(ctx, "rename", .rename, "Rename…", ready, false)) {
+            try app.openBranchDialog(.rename_branch, branch);
+        } else if (try app.menuAction(ctx, "copy-name", .copy, "Copy branch name", true, false)) {
+            try ctx.writeClipboard(branch);
+        } else if (try app.pushAction(ctx, snapshot, branch, ready)) {
+            // Requested by the row.
+        } else if (try separated(ctx, "delete-group") and try app.menuAction(ctx, "delete", .remove, "Delete…", other, true)) {
+            try app.request(ctx, .delete_branch, branch, "");
+        } else if (try app.menuAction(ctx, "force-delete", .remove, "Force delete…", other, true)) {
+            try app.request(ctx, .force_delete_branch, branch, "");
+        } else acted = false;
+        if (acted and app.branches_open) app.closeBranches(ctx);
+    }
+};
+
 const ProjectActions = struct {
     app: *Self,
     index: usize,
@@ -1214,6 +1278,19 @@ fn ignorePath(self: *Self, ctx: *ui.Frame, file: model.File, scope: ignore.Scope
     self.message(try std.fmt.allocPrint(ctx.arena(), "{s}{s}{s}", .{ line, if (added) " added to .gitignore." else " is already in .gitignore.", if (tracked) " Git already tracks this file, so its changes stay listed." else "" }), false);
     if (self.background_busy) self.refresh_pending = true else try self.launchInternal(.git, repository, .{ .operation = .refresh }, true);
     ctx.requestRedraw();
+}
+/// A menu separator inside a chain of rows; always true so the chain goes on.
+fn separated(ctx: *ui.Frame, key: []const u8) !bool {
+    try menuSeparator(ctx, key);
+    return true;
+}
+/// "Push to origin" for any local branch; pushing also links it to the remote branch.
+fn pushAction(self: *Self, ctx: *ui.Frame, snapshot: model.Snapshot, branch: []const u8, ready: bool) !bool {
+    const remote = guidance.defaultRemote(snapshot.remotes) orelse return false;
+    const title = try std.fmt.allocPrint(ctx.arena(), "Push to {s}", .{try shortName(ctx.arena(), remote)});
+    if (!try self.menuAction(ctx, "push-branch", .publish, title, ready, false)) return false;
+    try self.request(ctx, .publish, branch, remote);
+    return true;
 }
 /// Keeps a menu label on one line.
 fn shortName(a: std.mem.Allocator, name: []const u8) ![]const u8 {
@@ -1319,9 +1396,10 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     try titlebar.close(ctx, &self.app.main_viewport.window, self.lucide);
     const root = Rect{ .key = .str("root"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .font_size = .sm, .padding = .init(0, root_padding, root_padding, root_padding), .gap = 8 } };
     _ = try root.open(ctx);
-    const body = Rect{ .key = .str("body"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row, .gap = 10 } };
+    const body = Rect{ .key = .str("body"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row } };
     _ = try body.open(ctx);
     try self.sidebar(ctx);
+    try self.resizeHandle(ctx, .sidebar);
     const main = Rect{ .key = .str("main"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .gap = 10 } };
     _ = try main.open(ctx);
     try self.toolbar(ctx);
@@ -1406,7 +1484,7 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
     }
 }
 fn sidebar(self: *Self, ctx: *ui.Frame) !void {
-    const panel = Rect{ .key = .str("sidebar"), .style = &.{ .width = .fixed(212), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 2, .background = .elevated, .radius = .{ .fixed = 14 } } };
+    const panel = Rect{ .key = .str("sidebar"), .style = &.{ .width = .fixed(try self.panelWidth(ctx, .sidebar)), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 2, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try panel.open(ctx);
     try sectionLabel(ctx, "workspace-label", "Workspace");
     inline for (.{ .{ Page.changes, "\u{e86f}  Changes" }, .{ Page.history, "\u{e889}  History" }, .{ Page.operations, "\u{e8d4}  Repository" } }) |entry| {
@@ -1515,6 +1593,114 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     if (try nav(ctx, "\u{e87b}  Extensions", self.page == .extensions, true)) self.page = .extensions;
     if (try nav(ctx, "\u{e8b8}  Settings", self.page == .settings, true)) self.page = .settings;
     try panel.close(ctx);
+}
+fn handleKey(panel: Panel) ui.Key {
+    return ui.Key.str("resize-handle").indexed(@backingInt(panel));
+}
+/// Narrowest and widest a panel may be in this window. The diff keeps `diff_width_min`.
+fn panelBounds(self: *Self, ctx: *ui.Frame, panel: Panel) [2]f32 {
+    const window: f32 = @floatFromInt(ctx.input().logical_extent.width);
+    const low: f32, const high: f32 = switch (panel) {
+        .sidebar => .{ 168, @min(420, window * 0.3) },
+        .changes => .{ 240, @min(720, window - 2 * root_padding - 2 * gutter - diff_width_min - self.shownWidth(ctx, .sidebar)) },
+    };
+    return .{ low, @max(low, high) };
+}
+/// The saved width of a panel, fitted to this window.
+fn shownWidth(self: *Self, ctx: *ui.Frame, panel: Panel) f32 {
+    const bounds = self.panelBounds(ctx, panel);
+    return std.math.clamp(@as(f32, @floatFromInt(switch (panel) {
+        .sidebar => self.config.data.sidebar_width,
+        .changes => self.config.data.changes_width,
+    })), bounds[0], bounds[1]);
+}
+/// A panel's width for this frame. A press on its gutter holds the edge, which
+/// then follows the pointer; the width is saved once the edge is let go.
+fn panelWidth(self: *Self, ctx: *ui.Frame, panel: Panel) !f32 {
+    const saved = switch (panel) {
+        .sidebar => &self.config.data.sidebar_width,
+        .changes => &self.config.data.changes_width,
+    };
+    const input = &ctx.ui().input;
+    const x: f32 = @floatCast(input.mouse_pos[0]);
+    if (self.resize == null and ctx.ui().leftPressed(handleKey(panel).hash(), .exact)) self.resize = .{ .panel = panel, .grab = x - self.shownWidth(ctx, panel), .from = saved.* };
+    if (self.resize) |resize| if (resize.panel == panel) {
+        if (input.keyPressed(.escape) or input.focus_lost or input.pointer_cancelled) {
+            saved.* = resize.from;
+            self.resize = null;
+        } else if (input.mouseButton(.left).down) {
+            const bounds = self.panelBounds(ctx, panel);
+            saved.* = @intFromFloat(@round(std.math.clamp(x - resize.grab, bounds[0], bounds[1])));
+        } else {
+            self.resize = null;
+            if (saved.* != resize.from) try self.config.save(self.io);
+        }
+        ctx.requestRedraw();
+    };
+    return self.shownWidth(ctx, panel);
+}
+/// The gutter after a resizable panel. Hovering or holding it lights a line
+/// down the gutter, with a glow in the accent colour at the pointer.
+fn resizeHandle(self: *Self, ctx: *ui.Frame, panel: Panel) !void {
+    const Canvas = ui.component.Canvas;
+    const key = handleKey(panel);
+    const held = if (self.resize) |resize| resize.panel == panel else false;
+    // Another drag passing over the gutter leaves it dark.
+    const hovered = self.resize == null and self.drag == null and !ctx.ui().input.mouseButton(.left).down and ctx.ui().hovering(key.hash());
+    if (hovered or held) ctx.ui().requestCursor(.resize_horizontal);
+    const shown = ctx.ui().anim(key.hash(), "shown", if (hovered or held) 1 else 0, .{ .duration_ms = 180 });
+    const grip = ctx.ui().anim(key.hash(), "held", if (held) 1 else 0, .{ .duration_ms = 140 });
+    const box = (try ctx.ui().state.getOrCreate(.measured, ctx.ui().allocator, key.hash())).box;
+    const height = box.h();
+    const at = &self.glow_y[@backingInt(panel)];
+    if (hovered or held) at.* = std.math.clamp(@as(f32, @floatCast(ctx.ui().input.mouse_pos[1])) - box.y(), 0, height);
+    // Slices along the gutter, each fading sideways from the centre line.
+    const slices = 24;
+    var commands: [3 + 3 * slices]Canvas.DrawCmd = undefined;
+    var count: usize = 0;
+    if (shown > 0.01 and height > 0) {
+        const theme = ctx.ui().theme;
+        const accent = theme.primary.value;
+        const clear = [4]f32{ accent[0], accent[1], accent[2], 0 };
+        const centre = gutter / 2;
+        // The glow lengthens and brightens while the edge is held.
+        const reach = 90 + 40 * grip;
+        const step = 2 * reach / @as(f32, slices);
+        // Everything fades out over this distance towards the ends of the gutter.
+        const fade = @min(56, height / 2);
+        const dim = theme.dimmed.value;
+        const line = [4]f32{ dim[0], dim[1], dim[2], dim[3] * 0.2 * shown };
+        const line_clear = [4]f32{ dim[0], dim[1], dim[2], 0 };
+        commands[0] = .{ .fill_rect_gradient = .{ .x = centre - 0.5, .y = 0, .w = 1, .h = fade, .colors = .{ line_clear, line_clear, line, line } } };
+        commands[1] = .{ .fill_rect = .{ .x = centre - 0.5, .y = fade, .w = 1, .h = height - 2 * fade, .color = line } };
+        commands[2] = .{ .fill_rect_gradient = .{ .x = centre - 0.5, .y = height - fade, .w = 1, .h = fade, .colors = .{ line, line, line_clear, line_clear } } };
+        count = 3;
+        // Strength at the top of the first slice; the ends taper to nothing.
+        var above: f32 = 0;
+        for (1..slices + 1) |i| {
+            const t = @as(f32, @floatFromInt(i)) * 2 / @as(f32, slices) - 1;
+            const y = at.* - reach + step * @as(f32, @floatFromInt(i - 1));
+            // Dark a slice short of each end, so a slice cut by the end is dark throughout.
+            const end = std.math.clamp((@min(y + step, height - y - step) - step) / fade, 0, 1);
+            const below = (1 - t * t) * (1 - t * t) * end * end * (3 - 2 * end);
+            const halo = (0.18 + 0.14 * grip) * shown * accent[3];
+            const core = (0.5 + 0.25 * grip) * shown * accent[3];
+            const halo_above = [4]f32{ accent[0], accent[1], accent[2], halo * above };
+            const halo_below = [4]f32{ accent[0], accent[1], accent[2], halo * below };
+            const core_above = [4]f32{ accent[0], accent[1], accent[2], core * above };
+            const core_below = [4]f32{ accent[0], accent[1], accent[2], core * below };
+            commands[count] = .{ .fill_rect_gradient = .{ .x = 0, .y = y, .w = centre, .h = step, .colors = .{ clear, halo_above, halo_below, clear } } };
+            commands[count + 1] = .{ .fill_rect_gradient = .{ .x = centre, .y = y, .w = centre, .h = step, .colors = .{ halo_above, clear, clear, halo_below } } };
+            commands[count + 2] = .{ .fill_rect_gradient = .{ .x = centre - 1, .y = y, .w = 2, .h = step, .colors = .{ core_above, core_above, core_below, core_below } } };
+            count += 3;
+            above = below;
+        }
+    }
+    try ctx.e(Canvas{ .key = key, .interactive = true, .commands = commands[0..count], .style = comptime &.{ .width = .fixed(gutter), .height = .grow() } });
+    try ctx.ui().setAccessibility(key.hash(), .{ .role = .generic, .name = switch (panel) {
+        .sidebar => "Resize the workspace panel",
+        .changes => "Resize the changes panel",
+    } });
 }
 /// Whether this frame's press landed on a sidebar row rather than on its open menu.
 fn pressedRow(self: *Self, ctx: *ui.Frame, menu: ui.Key) bool {
@@ -1687,12 +1873,23 @@ fn displayName(self: *Self, path_value: []const u8) []const u8 {
     for (self.config.data.repositories) |repository| if (config_mod.equalPath(repository.path, path_value)) return repository.label();
     return std.fs.path.basename(std.mem.trimEnd(u8, path_value, "/\\"));
 }
+fn contains(list: []const []const u8, name: []const u8) bool {
+    for (list) |entry| if (std.mem.eql(u8, entry, name)) return true;
+    return false;
+}
+/// Opens the name dialog for a new branch starting at `subject`, or to rename `subject`.
+fn openBranchDialog(self: *Self, target: NameTarget, subject: []const u8) !void {
+    self.name_subject.clearRetainingCapacity();
+    try self.name_subject.appendSlice(self.a, subject);
+    try self.openNameDialog(target);
+}
 fn openNameDialog(self: *Self, target: NameTarget) !void {
     self.name_input.clearRetainingCapacity();
     switch (target) {
         .repository => |index| try self.name_input.appendSlice(self.a, self.config.data.repositories[index].label()),
         .group => |id| try self.name_input.appendSlice(self.a, self.config.data.groups[self.config.groupIndex(id).?].name),
-        .new_group => {},
+        .new_group, .new_branch => {},
+        .rename_branch => try self.name_input.appendSlice(self.a, self.name_subject.items),
     }
     self.name_target = target;
     self.name_focus = true;
@@ -1711,6 +1908,12 @@ fn nameDialog(self: *Self, ctx: *ui.Frame) !void {
         .new_group => |member| if (member) |index| if (index >= repositories.len) {
             self.name_open = false;
         },
+        .new_branch, .rename_branch => {
+            // The branch may have gone in a refresh while the dialog was open.
+            const subject = self.name_subject.items;
+            const known = if (self.snapshot) |s| subject.len == 0 or contains(s.branches, subject) else false;
+            if (!known) self.name_open = false;
+        },
     }
     if (!self.name_open) return;
     const dialog = ui.component.Dialog{ .key = .str("name-dialog"), .is_open = &self.name_open, .style = &.{ .width = .fixed(460), .gap = 14 } };
@@ -1723,11 +1926,20 @@ fn nameDialog(self: *Self, ctx: *ui.Frame) !void {
         },
         .group => try heading(ctx, "Rename group", "Choose a new name for this group."),
         .new_group => |member| try heading(ctx, "New group", if (member) |index| try std.fmt.allocPrint(ctx.arena(), "Name the group to move {s} into.", .{repositories[index].label()}) else "Groups are folders in the sidebar for your repositories."),
+        .new_branch => {
+            placeholder = "Branch name";
+            const from = self.name_subject.items;
+            try heading(ctx, "New branch", try std.fmt.allocPrint(ctx.arena(), "Starts from {s} and switches to it. Uncommitted changes come along.", .{try diff.safeText(ctx.arena(), if (from.len > 0) from else self.snapshot.?.branch)}));
+        },
+        .rename_branch => {
+            placeholder = "Branch name";
+            try heading(ctx, "Rename branch", try std.fmt.allocPrint(ctx.arena(), "Renames {s} on this computer. A copy already pushed to a remote keeps its old name.", .{try diff.safeText(ctx.arena(), self.name_subject.items)}));
+        },
     }
     const input_key = ui.Key.str("name-input");
     // Read Enter first: the focused field consumes the frame's keys.
     const enter = ctx.ui().focused(input_key.hash()) and (ctx.ui().input.keyPressed(.enter) or ctx.ui().input.keyPressed(.kp_enter));
-    try ctx.e(TextInput{ .key = input_key, .buf = &self.name_input, .bytes_max = config_mod.name_bytes_max, .placeholder = try diff.safeText(ctx.arena(), placeholder), .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
+    try ctx.e(TextInput{ .key = input_key, .buf = &self.name_input, .bytes_max = if (self.name_target == .new_branch or self.name_target == .rename_branch) branch_bytes_max else config_mod.name_bytes_max, .placeholder = try diff.safeText(ctx.arena(), placeholder), .style = &.{ .width = .grow(), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
     if (self.name_focus) {
         self.name_focus = false;
         ctx.ui().state.focused = input_key.hash();
@@ -1739,10 +1951,17 @@ fn nameDialog(self: *Self, ctx: *ui.Frame) !void {
     }
     const name = std.mem.trim(u8, self.name_input.items, " \t");
     // An empty project name goes back to the folder name; a group needs one.
-    const ready = name.len > 0 or self.name_target == .repository;
+    var ready = name.len > 0 or self.name_target == .repository;
+    if ((self.name_target == .new_branch or self.name_target == .rename_branch) and name.len > 0) {
+        // Git checks the rest of the name; these are the mistakes worth catching early.
+        const unchanged = self.name_target == .rename_branch and std.mem.eql(u8, name, self.name_subject.items);
+        const problem: ?[]const u8 = if (unchanged) null else if (contains(self.snapshot.?.branches, name)) "A branch with this name already exists." else if (name[0] == '-' or std.mem.indexOfAny(u8, name, " \t~^:?*[\\") != null or std.mem.indexOf(u8, name, "..") != null) "Branch names cannot contain spaces, start with a dash, or use ~ ^ : ? * [ \\ or two dots." else null;
+        if (problem) |text| try label(ctx, "name-problem", text, .dimmed);
+        ready = problem == null and !unchanged and self.available();
+    }
     const entered = ready and enter;
     const actions = try row(ctx, "name-actions");
-    if (try button(ctx, "name-save", if (self.name_target == .new_group) "Create" else "Save", ready, true) or entered) {
+    if (try button(ctx, "name-save", if (self.name_target == .new_group or self.name_target == .new_branch) "Create" else "Save", ready, true) or entered) {
         switch (self.name_target) {
             .repository => |index| try self.config.rename(self.io, index, if (std.mem.eql(u8, name, placeholder)) "" else name),
             .group => |id| try self.config.renameGroup(self.io, id, name),
@@ -1750,6 +1969,8 @@ fn nameDialog(self: *Self, ctx: *ui.Frame) !void {
                 const id = try self.config.addGroup(self.io, name);
                 if (member) |index| try self.config.setGroup(self.io, index, id);
             },
+            .new_branch => try self.request(ctx, .create_branch, name, self.name_subject.items),
+            .rename_branch => try self.request(ctx, .rename_branch, self.name_subject.items, name),
         }
         self.name_open = false;
     }
@@ -1859,13 +2080,7 @@ fn toolbar(self: *Self, ctx: *ui.Frame) !void {
     try title.close(ctx);
     const ready = self.available() and self.snapshot != null;
     if (self.snapshot) |snapshot| if (self.provider.capabilities.branches and snapshot.branches.len > 0) {
-        var initial: ?u32 = null;
-        for (snapshot.branches, 0..) |branch, i| if (std.mem.eql(u8, branch, snapshot.branch)) {
-            initial = @intCast(i);
-            break;
-        };
-        const branch = try ctx.interact(ui.component.SelectInput([]const u8){ .key = ui.Key.str(snapshot.branch).indexed(107), .values = snapshot.branches, .labels = snapshot.branches, .initial_selected = initial, .placeholder = "Switch branch", .style = &.{ .width = .fixed(160), .radius = .md, .background = .muted, .border_width = .all(0), .font_size = .sm, .padding = .xy(10, 7) } });
-        if (branch.selected) |selected| if (ready and !std.mem.eql(u8, selected.value, snapshot.branch)) try self.request(ctx, .switch_branch, selected.value, "");
+        try self.branchPicker(ctx, &snapshot);
     };
     const actions = Rect{ .key = .str("toolbar-actions"), .style = &.{ .direction = .row, .gap = 4, .@"align" = .center } };
     _ = try actions.open(ctx);
@@ -1879,6 +2094,96 @@ fn toolbar(self: *Self, ctx: *ui.Frame) !void {
     }
     try actions.close(ctx);
     try bar.close(ctx);
+}
+fn closeBranches(self: *Self, ctx: *ui.Frame) void {
+    self.branches_open = false;
+    // A row's menu must not reappear with the list.
+    if (self.active_context) |menu| if (ctx.ui().state.get(.context_menu, menu.hash())) |state| {
+        state.open = false;
+    };
+    self.active_context = null;
+    ctx.requestRedraw();
+}
+/// The current branch in the toolbar. It opens a list to switch branches from,
+/// where each branch has a context menu for the rest of branch management.
+fn branchPicker(self: *Self, ctx: *ui.Frame, snapshot: *const model.Snapshot) !void {
+    const u = ctx.ui();
+    const key = ui.Key.str("branch-picker");
+    const popup_key = key.indexed(1);
+    const filter_key = key.indexed(2);
+    const ready = self.available();
+    const current = try diff.safeText(ctx.arena(), snapshot.branch);
+    const b = Button{ .key = key, .style = &.{ .width = .fixed(branch_select_width), .justify = .start, .@"align" = .center, .gap = 8, .padding = .xy(10, 5), .radius = .md, .font_size = .sm, .background = .muted, .foreground = .text } };
+    const response = try b.openResponse(ctx);
+    try u.setAccessibility(response.id, .{ .role = .button, .name = try std.fmt.allocPrint(ctx.arena(), "Branch {s}", .{current}), .state = .{ .expanded = self.branches_open } });
+    try ctx.e(Text{ .key = key.indexed(3), .content = "\u{e0e5}", .selectable = false, .style = &.{ .width = .fixed(15), .font = "lucide", .font_size = .{ .px = 15 }, .foreground = .dimmed } }); // git-branch
+    try truncatedLabel(ctx, key.indexed(10), current);
+    try ctx.e(Text{ .key = key.indexed(4), .content = "\u{e210}", .selectable = false, .style = &.{ .width = .fixed(13), .font = "lucide", .font_size = .{ .px = 13 }, .foreground = .dimmed } }); // chevrons-up-down
+    try b.close(ctx);
+    if (response.clicked) {
+        if (self.branches_open) self.closeBranches(ctx) else {
+            self.branches_open = true;
+            self.branch_focus = true;
+            self.branch_filter.clearRetainingCapacity();
+            ctx.requestRedraw();
+        }
+    }
+    if (!self.branches_open) return;
+    const menu_open = if (self.active_context) |menu| if (u.state.get(.context_menu, menu.hash())) |state| state.open else false else false;
+    // A row's menu is a layout root of its own, so the list is not among its ancestors.
+    const in_menu = if (self.active_context) |menu| menu_open and u.isHoveredWithin(menu.indexed(1).hash()) else false;
+    const outside = (u.input.mouseButton(.left).pressed or u.input.mouseButton(.right).pressed) and !in_menu and !u.isHoveredWithin(key.hash()) and !u.isHoveredWithin(popup_key.hash());
+    // Escape closes an open row menu first.
+    if (outside or (!menu_open and u.input.containsKey(.escape))) {
+        if (!outside) u.input.consumeKeyboard();
+        return self.closeBranches(ctx);
+    }
+    const anchor = (try u.state.getOrCreate(.measured, u.allocator, key.hash())).box;
+    const window = ctx.input().logical_extent;
+    const width: f32 = @min(320, @as(f32, @floatFromInt(window.width)) - 2 * root_padding);
+    // Hangs from the right edge of the button, which sits near the window's.
+    const x = @max(root_padding, anchor.x() + anchor.w() - width);
+    const y = anchor.y() + anchor.h() + 6;
+    const popup = u.resolveStyle(popup_key.hash(), .{ .base = &.{}, .user = &branch_popup }, .{}, null);
+    var config = popup.element(.{ .interactive = true });
+    config.width = .fixed(width);
+    config.height = .{ .kind = .fit, .max = @max(120, @as(f32, @floatFromInt(window.height)) - y - root_padding) };
+    _ = try u.openResolved(popup_key, &popup, config, .{ x, y });
+    try ctx.e(TextInput{ .key = filter_key, .buf = &self.branch_filter, .placeholder = "Filter branches…", .style = &.{ .width = .grow(), .background = .muted, .border_color = .transparent, .radius = .md, .padding = .xy(10, 7) } });
+    if (self.branch_focus) {
+        self.branch_focus = false;
+        u.state.focused = filter_key.hash();
+        ctx.requestRedraw();
+    }
+    const list = Rect{ .key = key.indexed(5), .style = comptime &.{ .width = .grow(), .height = .{ .kind = .fit, .max = 10 * nav_height }, .direction = .column, .gap = 2, .overflow = .scroll_y } };
+    _ = try list.open(ctx);
+    const query = std.mem.trim(u8, self.branch_filter.items, " \t");
+    var shown: usize = 0;
+    for (snapshot.branches) |branch| {
+        if (query.len > 0 and std.ascii.findIgnoreCase(branch, query) == null) continue;
+        shown += 1;
+        const checked_out = std.mem.eql(u8, branch, snapshot.branch);
+        const row_key = ui.Key.str("branch-context").indexed(ui.Key.str(branch).hash());
+        const menu = ui.component.ContextMenu(BranchActions){ .key = row_key, .menu = .{ .app = self, .branch = branch }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
+        try self.openContextMenu(ctx, &menu);
+        if (try navKey(ctx, row_key.indexed(2), try diff.safeText(ctx.arena(), branch), checked_out, true)) {
+            self.closeBranches(ctx);
+            if (!checked_out and ready) try self.request(ctx, .switch_branch, branch, "");
+        }
+        try menu.close(ctx);
+        // An action from the row's menu is done with the list too.
+        if (!self.branches_open) break;
+    }
+    if (shown == 0) try label(ctx, "branch-none", "No branches match that filter.", .dimmed);
+    try list.close(ctx);
+    if (self.branches_open) {
+        try menuSeparator(ctx, "branch-new-group");
+        if (try self.menuAction(ctx, "branch-new", .new_branch, "New branch…", ready, false)) {
+            self.closeBranches(ctx);
+            try self.openBranchDialog(.new_branch, "");
+        }
+    }
+    u.close();
 }
 /// Where the branch stands against its remote, in words that say whether one exists.
 fn syncSummary(a: std.mem.Allocator, s: model.Snapshot) ![]const u8 {
@@ -1942,9 +2247,9 @@ fn worktree(self: *Self, ctx: *ui.Frame) !void {
     }
     const live = if (switching) null else self.snapshot;
     const shown_files: []const model.File = if (live) |s| s.files else &.{};
-    const body = Rect{ .key = .str("worktree"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row, .gap = 10 } };
+    const body = Rect{ .key = .str("worktree"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .row } };
     _ = try body.open(ctx);
-    const column = Rect{ .key = .str("changes-column"), .style = &.{ .width = .fixed(308), .height = .grow(), .direction = .column, .gap = 10 } };
+    const column = Rect{ .key = .str("changes-column"), .style = &.{ .width = .fixed(try self.panelWidth(ctx, .changes)), .height = .grow(), .direction = .column, .gap = 10 } };
     _ = try column.open(ctx);
     const list = Rect{ .key = .str("file-panel"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 8, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try list.open(ctx);
@@ -2013,6 +2318,7 @@ fn worktree(self: *Self, ctx: *ui.Frame) !void {
         try commit_panel.close(ctx);
     }
     try column.close(ctx);
+    try self.resizeHandle(ctx, .changes);
     const right = Rect{ .key = .str("diff-panel"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .padding = .all(12), .gap = 10, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try right.open(ctx);
     const source_files: []const model.File = if (switching) &.{} else if (self.page == .history) if (self.revision) |r| r.files else &.{} else shown_files;
@@ -2361,10 +2667,15 @@ fn operations(self: *Self, ctx: *ui.Frame) !void {
         const state = try settingRow(ctx, "operation-state", "Current branch", tracking, true, false);
         try ctx.e(Text{ .key = .str("operation-state-badge"), .content = @tagName(snapshot.state), .style = &.{ .background = .muted, .padding = .xy(10, 4), .radius = .sm, .foreground = if (snapshot.state == .normal) .dimmed else .warning, .font_size = .xs } });
         try state.close(ctx);
-        const branches = try settingRow(ctx, "branches-row", "Branches", "Select a branch to switch to it.", false, true);
+        const branches = try settingRow(ctx, "branches-row", "Branches", "Select a branch to switch to it. Right-click one for more.", false, true);
         const branch_list = Rect{ .key = .str("branches"), .style = &.{ .width = .grow(), .height = .fixed(42), .direction = .row, .gap = 8, .overflow = .scroll_x } };
         _ = try branch_list.open(ctx);
-        for (snapshot.branches, 0..) |branch, i| if (try buttonKey(ctx, ui.Key.str("branch-tool").indexed(i), branch, self.available(), false)) try self.request(ctx, .switch_branch, branch, "");
+        for (snapshot.branches, 0..) |branch, i| {
+            const menu = ui.component.ContextMenu(BranchActions){ .key = ui.Key.str("branch-tool-context").indexed(ui.Key.str(branch).hash()), .menu = .{ .app = self, .branch = branch }, .parts = .{ .popup = &menu_popup } };
+            try self.openContextMenu(ctx, &menu);
+            if (try buttonKey(ctx, ui.Key.str("branch-tool").indexed(i), branch, self.available(), false)) try self.request(ctx, .switch_branch, branch, "");
+            try menu.close(ctx);
+        }
         try branch_list.close(ctx);
         try branches.close(ctx);
         const remotes = try settingRow(ctx, "remotes", "Remotes", if (snapshot.remotes.len > 0) try std.mem.join(ctx.arena(), ", ", snapshot.remotes) else "No remotes configured.", false, false);
@@ -2982,7 +3293,11 @@ fn dialogs(self: *Self, ctx: *ui.Frame) !void {
         _ = try dialog.open(ctx);
         try heading(ctx, "Confirm action", "Review the repository and action before continuing.");
         try label(ctx, "confirm-path", self.path() orelse "", .text);
-        if (self.pending_request) |req| try label(ctx, "confirm-request", try std.fmt.allocPrint(ctx.arena(), "Action: {s}\nTarget: {s}\nThis may replace local changes or rewrite history. Make sure you have a backup.", .{ @tagName(req.operation), req.value }), .warning);
+        if (self.pending_request) |req| try label(ctx, "confirm-request", try std.fmt.allocPrint(ctx.arena(), "Action: {s}\nTarget: {s}\n{s}", .{ @tagName(req.operation), req.value, switch (req.operation) {
+            .delete_branch => "The branch is removed from this computer. Git refuses if it holds commits that are not merged.",
+            .force_delete_branch => "The branch is removed from this computer even if it holds commits that are not merged. Those commits will be hard to recover.",
+            else => "This may replace local changes or rewrite history. Make sure you have a backup.",
+        } }), .warning);
         if (self.pending_extension) |extension| try label(ctx, "confirm-extension", try std.fmt.allocPrint(ctx.arena(), "Extension: {s}\nExecutable: {s}\nCommand: {s}\nThis executable can access files and network with your user permissions. Only continue if you trust its publisher.", .{ extension.manifest.name, extension.manifest.executable orelse "", extension.command.id }), .warning);
         const actions = try row(ctx, "confirm-actions");
         if (try button(ctx, "confirm-run", "Continue", self.available(), true)) {
@@ -3252,6 +3567,23 @@ fn navKey(ctx: *ui.Frame, key: ui.Key, content: []const u8, active: bool, enable
     try b.close(ctx);
     return response.clicked;
 }
+/// `content` in the small font, cut short with an ellipsis where it is wider than `width`.
+fn fitted(ctx: *ui.Frame, key: ui.Key, content: []const u8, width: f32) ![]const u8 {
+    const resolved = ctx.ui().resolveStyle(key.hash(), .{ .base = &.{}, .user = &.{ .font_size = .sm } }, .{}, null);
+    const face = try ctx.ui().font.getFace(resolved.content.font);
+    const scale = ctx.ui().content_scale;
+    const size = resolved.content.font_size * scale;
+    const shaped = try face.shape(content, size);
+    if (shaped.width <= width * scale) return content;
+    const ellipsis = try face.shape("…", size);
+    const limit = @max(0, width * scale - ellipsis.width);
+    var end: usize = content.len;
+    for (shaped.glyphs) |glyph| if (glyph.x + glyph.advance > limit) {
+        end = glyph.cluster;
+        break;
+    };
+    return if (width * scale >= ellipsis.width) try std.fmt.allocPrint(ctx.arena(), "{s}…", .{content[0..end]}) else "";
+}
 fn truncatedLabel(ctx: *ui.Frame, key: ui.Key, content: []const u8) !void {
     const measured = try ctx.ui().state.getOrCreate(.measured, ctx.ui().allocator, key.hash());
     const width = measured.width;
@@ -3260,22 +3592,7 @@ fn truncatedLabel(ctx: *ui.Frame, key: ui.Key, content: []const u8) !void {
     _ = try tooltip.open(ctx);
     var visible: []const u8 = "";
     if (width > 0) {
-        const resolved = ctx.ui().resolveStyle(key.indexed(3).hash(), .{ .base = &.{}, .user = &.{ .font_size = .sm } }, .{}, null);
-        const face = try ctx.ui().font.getFace(resolved.content.font);
-        const scale = ctx.ui().content_scale;
-        const size = resolved.content.font_size * scale;
-        const shaped = try face.shape(content, size);
-        visible = content;
-        if (shaped.width > width * scale) {
-            const ellipsis = try face.shape("…", size);
-            const limit = @max(0, width * scale - ellipsis.width);
-            var end: usize = content.len;
-            for (shaped.glyphs) |glyph| if (glyph.x + glyph.advance > limit) {
-                end = glyph.cluster;
-                break;
-            };
-            visible = if (width * scale >= ellipsis.width) try std.fmt.allocPrint(ctx.arena(), "{s}…", .{content[0..end]}) else "";
-        }
+        visible = try fitted(ctx, key.indexed(3), content, width);
     } else if (measured.height == 0) ctx.requestRedraw();
     try ctx.e(Text{ .key = key.indexed(3), .content = visible, .selectable = false, .style = &.{ .width = .grow(), .wrap = false } });
     if (ctx.ui().input.mouseButton(.right).pressed) if (ctx.ui().state.get(.tooltip, key.hash())) |state| {

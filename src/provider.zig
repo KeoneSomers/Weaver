@@ -116,11 +116,11 @@ fn executeGit(io: std.Io, a: std.mem.Allocator, path: []const u8, request: model
         if (!head.ok) return process.git(io, a, path, if (request.operation == .unstage) &.{ "rm", "--cached", "--force", "--", v } else &.{ "rm", "--cached", "--force", "-r", "--", "." });
     }
     switch (request.operation) {
-        .create_branch, .switch_branch, .delete_branch, .merge, .rebase, .tag, .delete_tag, .cherry_pick, .revert, .add_remote, .set_remote, .remove_remote, .lfs_track, .lfs_untrack, .lfs_lock, .lfs_unlock, .publish => if (!process.validName(v)) return error.InvalidArgument,
+        .create_branch, .switch_branch, .rename_branch, .delete_branch, .force_delete_branch, .merge, .rebase, .tag, .delete_tag, .cherry_pick, .revert, .add_remote, .set_remote, .remove_remote, .lfs_track, .lfs_untrack, .lfs_lock, .lfs_unlock, .publish => if (!process.validName(v)) return error.InvalidArgument,
         else => {},
     }
     if ((request.operation == .add_remote or request.operation == .set_remote or request.operation == .clone) and !process.validRemote(if (request.operation == .clone) v else s)) return error.InvalidRemote;
-    if (request.operation == .publish and !process.validName(s)) return error.InvalidArgument;
+    if ((request.operation == .publish or request.operation == .rename_branch or (request.operation == .create_branch and s.len > 0)) and !process.validName(s)) return error.InvalidArgument;
     if (request.operation == .clone and !std.fs.path.isAbsolute(s)) return error.ExpectedAbsoluteCloneDestination;
     const args: []const []const u8 = switch (request.operation) {
         .stage => &.{ "add", "--", v },
@@ -133,9 +133,12 @@ fn executeGit(io: std.Io, a: std.mem.Allocator, path: []const u8, request: model
         .pull => &.{ "pull", "--ff-only" },
         .push => &.{"push"},
         .publish => &.{ "push", "--set-upstream", s, v },
-        .create_branch => &.{ "switch", "-c", v },
+        // An optional start point; without one the branch starts at HEAD.
+        .create_branch => if (s.len > 0) &.{ "switch", "-c", v, s } else &.{ "switch", "-c", v },
         .switch_branch => &.{ "switch", "--", v },
+        .rename_branch => &.{ "branch", "-m", "--", v, s },
         .delete_branch => &.{ "branch", "-d", "--", v },
+        .force_delete_branch => &.{ "branch", "-D", "--", v },
         .merge => &.{ "merge", "--", v },
         .rebase => &.{ "rebase", v },
         .rebase_continue => &.{ "-c", "core.editor=true", "rebase", "--continue" },
