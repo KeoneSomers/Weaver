@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("options", options);
     tests.root_module.addImport("toolbar_icon_font", b.createModule(.{ .root_source_file = b.path("assets/lucide.ttf") }));
     tests.root_module.addImport("git2", git2);
+    // credentials.zig stores the GitHub token in the macOS keychain.
+    if (target.result.os.tag == .macos) tests.root_module.linkFramework("Security", .{});
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Test Git, diffs, security and persistence").dependOn(&run_tests.step);
     const headless = b.addExecutable(.{ .name = "weaver-check", .root_module = b.createModule(.{
@@ -47,6 +49,7 @@ pub fn build(b: *std.Build) void {
     }) });
     headless.root_module.addOptions("options", options);
     headless.root_module.addImport("git2", git2);
+    if (target.result.os.tag == .macos) headless.root_module.linkFramework("Security", .{});
     b.step("check", "Build the headless Git inspector").dependOn(&b.addInstallArtifact(headless, .{}).step);
     if (b.option(bool, "headless", "Build only backend tests and tools") orelse false) return;
     const knots = b.lazyDependency("knots", .{ .target = target, .optimize = optimize }) orelse return;
@@ -73,6 +76,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("brand_badge_svg", b.createModule(.{ .root_source_file = b.path("assets/weaver-badge.svg") }));
     exe.root_module.addImport("git2", git2);
     exe.root_module.addImport("nfd", dialogs);
+    if (target.result.os.tag == .macos) exe.root_module.linkFramework("Security", .{});
     b.installArtifact(exe);
     b.installFile("assets/OFL.txt", "licenses/JetBrainsMono.txt");
     b.installFile("assets/Devicon-LICENSE.txt", "licenses/Devicon.txt");

@@ -30,7 +30,8 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
             .GIT_USE_STAT_MTIMESPEC = 1,
             .GIT_USE_FUTIMENS = 1,
             .GIT_QSORT_BSD = 1,
-            .GIT_RAND_GETENTROPY = 1,
+            // No GIT_RAND_GETENTROPY: macOS declares getentropy only in <sys/random.h>,
+            // which libgit2 does not include, so upstream leaves it off here too.
             .GIT_RAND_GETLOADAVG = 1,
             .GIT_IO_POLL = 1,
             .GIT_IO_SELECT = 1,
@@ -93,7 +94,12 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     }) });
     mod.addCSourceFiles(.{ .root = src.path("."), .files = &xdiff_sources, .flags = git_flags });
     mod.addCSourceFiles(.{ .root = src.path("."), .files = &llhttp_sources, .flags = &.{} });
-    mod.addCSourceFiles(.{ .root = src.path("."), .files = &zlib_sources, .flags = concat(b, &.{ "-DNO_VIZ", "-DSTDC", "-DNO_GZIP", "-DHAVE_SYS_TYPES_H", "-DHAVE_STDINT_H", "-DHAVE_STDDEF_H" }, if (os == .windows) &.{} else &.{ "-DZ_HAVE_UNISTD_H", "-D_LFS64_LARGEFILE", "-D_LARGEFILE64_SOURCE=1" }) });
+    mod.addCSourceFiles(.{ .root = src.path("."), .files = &zlib_sources, .flags = concat(b, &.{ "-DNO_VIZ", "-DSTDC", "-DNO_GZIP", "-DHAVE_SYS_TYPES_H", "-DHAVE_STDINT_H", "-DHAVE_STDDEF_H" }, switch (os) {
+        .windows => &.{},
+        // off64_t and the 64-bit file API variants exist only on Linux.
+        .linux => &.{ "-DZ_HAVE_UNISTD_H", "-D_LFS64_LARGEFILE", "-D_LARGEFILE64_SOURCE=1" },
+        else => &.{"-DZ_HAVE_UNISTD_H"},
+    }) });
     mod.addCSourceFiles(.{ .root = src.path("."), .files = &pcre2_sources, .flags = &(pcre2_static ++ .{ "-DHAVE_CONFIG_H", "-DPCRE2_CODE_UNIT_WIDTH=8" }) });
 
     switch (os) {
