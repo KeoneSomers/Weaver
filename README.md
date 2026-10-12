@@ -2,7 +2,7 @@
 
 Weaver is a fast, native Git desktop app for Windows, macOS and Linux. It is written in Zig with [KnotsUI](https://github.com/knots-ui/knots) and [libgit2](https://libgit2.org), so there is no webview or Electron runtime: one small executable that opens instantly and stays out of your way.
 
-![Weaver showing staged and unstaged changes beside a highlighted diff](docs/screenshots/changes.png)
+![Weaver showing staged and unstaged changes beside a highlighted diff](docs/screenshots/changes.webp)
 
 [![Build and test](https://github.com/KeoneSomers/Weaver/actions/workflows/ci.yml/badge.svg)](https://github.com/KeoneSomers/Weaver/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -43,7 +43,7 @@ Weaver uses the Git you already have installed, so install [Git](https://git-scm
 - Stage or unstage whole files, single hunks or everything at once, then commit.
 - Right-click a file to open it in your editor, reveal its folder, copy its path, add it to `.gitignore`, or discard its changes (with confirmation).
 
-![Side-by-side diff view](docs/screenshots/split.png)
+![Side-by-side diff view](docs/screenshots/split.webp)
 
 **Branches and history**
 

@@ -7,7 +7,7 @@ const options = @import("options");
 pub fn main(init: std.process.Init) !void {
     if (@import("builtin").os.tag != .windows) return error.WindowsBootstrapOnly;
     const a = init.arena.allocator();
-    const manifest = try updater.check(init.io, a, options.release_repo, options.update_public_key, "0.0.0");
+    const manifest = try updater.check(init.io, a, options.update_public_key, "0.0.0");
     var selected: ?updater.Asset = null;
     for (manifest.assets) |asset| if (std.mem.eql(u8, asset.platform, "windows-x86_64")) {
         selected = asset;

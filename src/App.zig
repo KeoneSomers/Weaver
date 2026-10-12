@@ -38,6 +38,10 @@ const nav_height: f32 = 32;
 const row_gap: f32 = 2;
 /// Distance between the tops of neighbouring sidebar rows.
 const row_pitch: f32 = nav_height + row_gap;
+/// Where a group's guide runs, under the middle of its heading's chevron.
+const group_guide_x: f32 = 16;
+/// How far a group's entries sit in from the list's left edge, clear of its guide.
+const group_indent: f32 = 24;
 const root_padding: f32 = 12;
 const menu_row_height: f32 = 30;
 const icon_cell: f32 = 38;
@@ -128,7 +132,6 @@ const Job = struct {
     provider: *const providers.Provider,
     client: []const u8 = "",
     device: []const u8 = "",
-    release_repo: []const u8 = "",
     update_key: []const u8 = "",
     asset: ?updater.Asset = null,
     manifest: ?plugins.Manifest = null,
@@ -283,7 +286,6 @@ second_input: std.ArrayList(u8) = .empty,
 connect_input: std.ArrayList(u8) = .empty,
 extension_path: std.ArrayList(u8) = .empty,
 client_input: std.ArrayList(u8) = .empty,
-release_input: std.ArrayList(u8) = .empty,
 settings_section: SettingsSection = .appearance,
 operation_index: u32 = 0,
 device: ?github.Device = null,
@@ -313,7 +315,7 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
     var config = try config_mod.Config.init(io, a, env);
     errdefer config.deinit();
     try AppIcon.prepare();
-    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1520, .height = 720, .title = "Weaver", .decorations = .none }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
+    var app = try knots.App.init(io, a, .{ .window = .{ .width = 1280, .height = 720, .title = "Weaver", .decorations = .none }, .ui = .{ .theme = themes.theme(config.data.theme, config.data.accent, config.data.text_size) } });
     var app_icon: AppIcon = .{};
     errdefer {
         app.deinit();
@@ -341,7 +343,6 @@ pub fn init(io: std.Io, a: std.mem.Allocator, env: *const std.process.Environ.Ma
         };
     }
     try self.client_input.appendSlice(a, options.oauth_client_id);
-    try self.release_input.appendSlice(a, if (config.data.release_repo.len > 0) config.data.release_repo else options.release_repo);
     self.split_diff = config.data.split_diff;
     return self;
 }
@@ -369,7 +370,7 @@ pub fn deinit(self: *Self) void {
     self.a.free(self.lucide);
     self.endDrag();
     self.clearDiffRows();
-    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "release_input", "icon_filter", "name_input", "name_subject", "branch_filter" }) |field| @field(self, field).deinit(self.a);
+    inline for (.{ "path_input", "remote_input", "commit_input", "filter_input", "value_input", "second_input", "connect_input", "extension_path", "client_input", "icon_filter", "name_input", "name_subject", "branch_filter" }) |field| @field(self, field).deinit(self.a);
     if (self.notice_owned) self.a.free(self.notice);
     self.a.free(self.failure_text);
     self.registry.deinit();
@@ -422,7 +423,7 @@ fn refreshTick(view: *knots.View, ctx: *ui.Frame, tick: repository_watch.Signal)
             self.refresh_pending = true;
         } else self.watcher.deinit(self.a);
     } else if (tick == .changed or (tick == .heartbeat and !self.watcher.native)) self.refresh_pending = true;
-    if (!self.picker_open and self.available() and !self.update_checked and self.config.data.auto_update_check and options.update_public_key.len == 64 and updater.validRepo(self.release_input.items)) {
+    if (!self.picker_open and self.available() and !self.update_checked and self.config.data.auto_update_check and options.update_public_key.len == 64) {
         self.update_checked = true;
         try self.launchInternal(.update_check, self.config.path, .{ .operation = .refresh }, true);
     }
@@ -628,7 +629,6 @@ fn launchInternal(self: *Self, kind: JobKind, path_value: []const u8, req: model
     job.request.second = try arena.dupe(u8, req.second);
     job.client = try arena.dupe(u8, self.client_input.items);
     if (self.device) |d| job.device = try arena.dupe(u8, d.device_code);
-    job.release_repo = try arena.dupe(u8, self.release_input.items);
     job.update_key = try arena.dupe(u8, options.update_public_key);
     if (kind == .update_download) if (self.update) |update| {
         for (update.assets) |asset| if (std.mem.eql(u8, asset.platform, updater.platform())) {
@@ -789,7 +789,7 @@ fn perform(io: std.Io, a: std.mem.Allocator, job: *Job, result: *Result) !void {
             result.message = "GitHub credentials removed from this computer.";
         },
         .update_check => {
-            result.update = updater.check(io, arena, job.release_repo, job.update_key, options.version) catch |err| switch (err) {
+            result.update = updater.check(io, arena, job.update_key, options.version) catch |err| switch (err) {
                 error.NoNewUpdate => {
                     result.message = "You have the latest version.";
                     return;
@@ -1487,16 +1487,6 @@ fn frame(view: *knots.View, ctx: *ui.Frame) !void {
 fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     const panel = Rect{ .key = .str("sidebar"), .style = &.{ .width = .fixed(try self.panelWidth(ctx, .sidebar)), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 2, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try panel.open(ctx);
-    try sectionLabel(ctx, "workspace-label", "Workspace");
-    inline for (.{ .{ Page.changes, "\u{e86f}  Changes" }, .{ Page.history, "\u{e889}  History" }, .{ Page.operations, "\u{e8d4}  Repository" } }) |entry| {
-        if (try nav(ctx, entry[1], self.page == entry[0], self.canNavigate())) {
-            self.page = entry[0];
-            self.clearDiffRows();
-            if (self.page == .changes) self.selectFile(if (self.snapshot) |s| @min(self.selected_file, if (s.files.len == 0) 0 else s.files.len - 1) else 0);
-            ctx.requestRedraw();
-        }
-    }
-    try space(ctx, "repo-gap", 10);
     try sectionLabel(ctx, "repos-label", "Repositories");
     const repos = Rect{ .key = .str("repositories"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .overflow = .scroll_y } };
     _ = try repos.open(ctx);
@@ -1521,13 +1511,17 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     const landed = if (self.drag) |*drag| self.moveDrag(ctx, drag, rows, .{ view.x(), view.y(), view.w(), view.h() }, .{ base.x(), base.y() }) else false;
     const pointer = ctx.ui().input.mouse_pos;
     const strip_at = sidebar_drag.groupedRows(&self.config.data, rows);
+    // Height of the selected repository's pages above the current row.
+    var pages_above: f32 = 0;
+    // A click in the loop changes the selection; the pages are listed once, under the row that had it.
+    const pages_under = self.config.data.selected;
     for (rows, 0..) |entry, row_index| {
         if (self.drag) |*drag| {
             try dragGap(ctx, drag, row_index);
             if (row_index == strip_at) try self.dragStrip(ctx, drag);
         }
         // Where a press on this row would hold it while it is dragged.
-        const grab = [2]f32{ @as(f32, @floatCast(pointer[0])) - base.x(), @as(f32, @floatCast(pointer[1])) - base.y() - row_pitch * @as(f32, @floatFromInt(row_index)) };
+        const grab = [2]f32{ @as(f32, @floatCast(pointer[0])) - base.x(), @as(f32, @floatCast(pointer[1])) - base.y() - row_pitch * @as(f32, @floatFromInt(row_index)) - pages_above };
         switch (entry) {
             .group => |group| {
                 const menu = ui.component.ContextMenu(GroupActions){ .key = ui.Key.str("group-context").indexed(group.id), .menu = .{ .app = self, .id = group.id }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
@@ -1541,11 +1535,20 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
                 const menu = ui.component.ContextMenu(ProjectActions){ .key = ui.Key.str("project-context").indexed(ui.Key.str(repository.path).hash()), .menu = .{ .app = self, .index = i }, .style = &.{ .width = .grow(), .height = .fixed(nav_height) }, .parts = .{ .popup = &menu_popup } };
                 try self.openContextMenu(ctx, &menu);
                 if (self.pressedRow(ctx, menu.key)) self.drag_press = .{ .item = .{ .repository = i }, .grab = grab, .width = base.w() };
-                if (try self.repositoryRow(ctx, i, repository)) try self.selectRepository(i);
+                const pages = self.drag == null and i == pages_under;
+                // The last entry of a group ends the guide that runs down from its heading.
+                const tail = row_index + 1 == rows.len or rows[row_index + 1] != .repository or self.config.data.repositories[rows[row_index + 1].repository].group != repository.group;
+                const guide: f32 = if (repository.group == 0) 0 else if (tail and !pages) nav_height else row_pitch;
+                if (try self.repositoryRow(ctx, i, repository, guide)) try self.selectRepository(i);
                 const old_count = self.config.data.repositories.len;
                 try menu.close(ctx);
                 // Removal changes the workspace list; rebuild it on the next frame.
                 if (self.config.data.repositories.len != old_count) break;
+                // The drag places rows a fixed pitch apart, so the pages fold away while one is carried.
+                if (pages) {
+                    try self.repositoryPages(ctx, if (repository.group == 0) 0 else row_pitch * repository_pages.len - if (tail) row_gap else 0);
+                    pages_above += row_pitch * repository_pages.len;
+                }
             },
         }
     }
@@ -1788,7 +1791,7 @@ fn dragGap(ctx: *ui.Frame, drag: *const Drag, slot: usize) !void {
     const height = drag.gaps[slot] - row_gap;
     if (height < 1) return;
     const key = ui.Key.str("drag-gap").indexed(slot);
-    const space_rect = Rect{ .key = key, .style = &.{ .width = .grow(), .height = .fixed(height), .padding = .init(0, 0, 0, 14 * drag.indent), .overflow = .hidden } };
+    const space_rect = Rect{ .key = key, .style = &.{ .width = .grow(), .height = .fixed(height), .padding = .init(0, 0, 0, group_indent * drag.indent), .overflow = .hidden } };
     _ = try space_rect.open(ctx);
     if (slot == drag.drop.slot) try ctx.e(Rect{ .key = key.indexed(1), .style = &.{ .width = .grow(), .height = .fixed(@min(height, nav_height)), .radius = .md, .background = themes.selection(ctx.ui().theme), .border_width = .all(1), .border_color = .accent, .opacity = 0.55 } });
     try space_rect.close(ctx);
@@ -1813,7 +1816,7 @@ fn dragGhost(self: *Self, ctx: *ui.Frame) !void {
     const drag = self.drag orelse return;
     const key = ui.Key.str("drag-ghost");
     const group = drag.item == .group;
-    const line = Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ drag.pos[0] - root_padding + 4 * drag.lift, drag.pos[1] - titlebar.height - 2 * drag.lift }, .width = .fixed(drag.width), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .gap = if (group) 6 else 0, .padding = .init(0, 8, 0, if (group) 10 else 4 + 14 * drag.indent), .radius = .md, .background = .toned, .border_width = .all(1), .border_color = .accent, .foreground = .text, .font_size = .sm, .overflow = .hidden, .opacity = 0.8 + 0.15 * drag.lift } };
+    const line = Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ drag.pos[0] - root_padding + 4 * drag.lift, drag.pos[1] - titlebar.height - 2 * drag.lift }, .width = .fixed(drag.width), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .gap = if (group) 6 else 0, .padding = .init(0, 8, 0, if (group) 10 else 4 + group_indent * drag.indent), .radius = .md, .background = .toned, .border_width = .all(1), .border_color = .accent, .foreground = .text, .font_size = .sm, .overflow = .hidden, .opacity = 0.8 + 0.15 * drag.lift } };
     _ = try line.open(ctx);
     switch (drag.item) {
         .group => |id| {
@@ -1833,11 +1836,52 @@ fn dragGhost(self: *Self, ctx: *ui.Frame) !void {
     }
     try line.close(ctx);
 }
+const repository_pages = [_]struct { Page, []const u8 }{ .{ .changes, "\u{e86f}  Changes" }, .{ .history, "\u{e889}  History" }, .{ .operations, "\u{e8d4}  Repository" } };
+/// The selected repository's pages, listed under its row along a guide that drops from its icon.
+/// `group_guide` is the height of its group's guide beside them, 0 when it is ungrouped.
+fn repositoryPages(self: *Self, ctx: *ui.Frame, group_guide: f32) !void {
+    const inset: f32 = if (group_guide > 0) group_indent + 16 else 16;
+    const indent = Rect{ .key = .str("repository-pages"), .style = &.{ .width = .grow(), .direction = .column, .padding = .init(0, 0, 0, inset) } };
+    _ = try indent.open(ctx);
+    if (group_guide > 0) try groupGuide(ctx, indent.key.indexed(1), inset, group_guide);
+    const guide = Rect{ .key = .str("repository-pages-guide"), .style = comptime &.{ .width = .grow(), .direction = .column } };
+    _ = try guide.open(ctx);
+    for (repository_pages, 0..) |entry, i| {
+        const active = self.page == entry[0];
+        // The stretch of the guide beside a page marks it as the open one.
+        const segment = Rect{ .key = ui.Key.str("repository-page").indexed(i), .style = &.{ .width = .grow(), .height = .fixed(if (i + 1 < repository_pages.len) row_pitch else nav_height), .direction = .row, .gap = if (active) 5 else 6 } };
+        _ = try segment.open(ctx);
+        try ctx.e(Rect{ .key = segment.key.indexed(1), .style = &.{ .width = .fixed(if (active) 2 else 1), .height = .grow(), .background = if (active) .accent else .muted } });
+        const clicked = try pageNav(ctx, entry[1], active, self.canNavigate());
+        try segment.close(ctx);
+        if (clicked) {
+            self.page = entry[0];
+            self.clearDiffRows();
+            if (self.page == .changes) self.selectFile(if (self.snapshot) |s| @min(self.selected_file, if (s.files.len == 0) 0 else s.files.len - 1) else 0);
+            ctx.requestRedraw();
+        }
+    }
+    try guide.close(ctx);
+    try indent.close(ctx);
+}
+/// The guide of a group, drawn beside one of its rows. It runs `height` down from the top
+/// of the row, whose content starts `inset` from the left edge of the list.
+fn groupGuide(ctx: *ui.Frame, key: ui.Key, inset: f32, height: f32) !void {
+    try ctx.e(Rect{ .key = key, .style = &.{ .position = .absolute, .offset = .{ group_guide_x - inset, 0 }, .width = .fixed(1), .height = .fixed(height), .background = .muted } });
+}
 /// A workspace entry: the icon opens its picker, the name selects the repository.
-fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.Repository) !bool {
+/// `group_guide` is the height of its group's guide beside it, 0 when it is ungrouped.
+fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.Repository, group_guide: f32) !bool {
     const active = self.config.data.selected == i;
     const name = try diff.safeText(ctx.arena(), repository.label());
-    const line = Rect{ .key = ui.Key.str("repository-row").indexed(i), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .padding = .init(0, 0, 0, if (repository.group != 0) 18 else 4), .radius = .md, .background = if (active) themes.selection(ctx.ui().theme) else .transparent } };
+    const row_key = ui.Key.str("repository-row").indexed(i);
+    // The whole row answers the pointer, from its left edge and behind the icon.
+    const hovered = self.canNavigate() and self.drag == null and ctx.ui().isHoveredWithin(row_key.hash());
+    const line = Rect{ .key = row_key, .style = &.{ .width = .grow(), .height = .fixed(nav_height), .direction = .row, .@"align" = .center, .padding = .init(0, 0, 0, 4), .radius = .md, .background = if (active) themes.selection(ctx.ui().theme) else .transparent, .foreground = if (active) .text else .dimmed, .state_layer = if (hovered) 0.15 else null } };
+    // A group's entry starts to the right of the guide, which keeps clear of its highlight.
+    const shell = Rect{ .key = row_key.indexed(2), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .direction = .row, .padding = .init(0, 0, 0, if (group_guide > 0) group_indent else 0) } };
+    _ = try shell.open(ctx);
+    if (group_guide > 0) try groupGuide(ctx, row_key.indexed(1), group_indent, group_guide);
     _ = try line.open(ctx);
     const icon_key = ui.Key.str("repository-icon").indexed(i);
     const icon_button = Button{ .key = icon_key, .style = &.{ .width = .fixed(26), .height = .fixed(26), .padding = .all(0), .radius = .{ .fixed = 6 }, .background = .transparent, .foreground = if (active) .text else .dimmed, .hover = &.{ .background = .toned, .state_layer = 0 }, .active = &.{ .background = .muted, .state_layer = 0 } } };
@@ -1848,13 +1892,15 @@ fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.R
     try icon_button.close(ctx);
     if (icon_response.clicked) self.openIconPicker(i);
     const key = ui.Key.str("repository-nav").indexed(i);
-    const b = Button{ .key = key, .disabled = !self.canNavigate(), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .padding = .xy(6, 5), .radius = .md, .font_size = .sm, .background = .transparent, .foreground = if (active) .text else .dimmed } };
+    const b = Button{ .key = key, .disabled = !self.canNavigate(), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .padding = .xy(6, 5), .radius = .md, .font_size = .sm, .background = .transparent, .foreground = if (active) .text else .dimmed, .hover = &.{ .state_layer = 0 }, .active = &.{ .state_layer = 0 } } };
     const response = try b.openResponse(ctx);
     try ctx.ui().setAccessibility(response.id, .{ .role = .button, .name = name, .state = .{ .disabled = !self.canNavigate() } });
     try truncatedLabel(ctx, key.indexed(10), name);
     try b.close(ctx);
     try line.close(ctx);
-    return response.clicked;
+    try shell.close(ctx);
+    // A click on the icon opens its picker and nothing else.
+    return response.clicked or (self.canNavigate() and !icon_response.hovered and !icon_response.clicked and ctx.ui().leftClicked(row_key.hash(), .within));
 }
 /// A group heading; clicking it shows or hides the group's entries.
 fn groupRow(ctx: *ui.Frame, group: config_mod.Group) !bool {
@@ -3137,14 +3183,8 @@ fn updateSettings(self: *Self, ctx: *ui.Frame) !void {
         try self.config.save(self.io);
     }
     try automatic.close(ctx);
-    const source = try settingRow(ctx, "release-repo-row", "Release repository", "The GitHub repository that publishes Weaver releases.", false, true);
-    const source_line = try row(ctx, "release-repo-line");
-    try ctx.e(TextInput{ .key = .str("release-repo"), .buf = &self.release_input, .placeholder = "owner/weaver", .style = &.{ .width = .fixed(420), .radius = .md, .background = .muted, .border_color = .toned, .padding = .xy(12, 9) } });
-    if (try button(ctx, "check-updates", "Check for updates", self.available(), false)) {
-        try self.saveSettings();
-        try self.launch(.update_check, self.config.path, .{ .operation = .refresh });
-    }
-    try source_line.close(ctx);
+    const source = try settingRow(ctx, "check-updates-row", "Check now", "Updates come from github.com/KeoneSomers/Weaver.", false, false);
+    if (try button(ctx, "check-updates", "Check for updates", self.available(), false)) try self.launch(.update_check, self.config.path, .{ .operation = .refresh });
     try source.close(ctx);
     if (self.update) |update| {
         const pending = try settingRow(ctx, "update-notes", try std.fmt.allocPrint(ctx.arena(), "Version {s} is available", .{update.version}), update.notes, false, false);
@@ -3205,12 +3245,6 @@ fn segmented(ctx: *ui.Frame, key: []const u8, labels: []const []const u8, select
     }
     try track.close(ctx);
     return picked;
-}
-fn saveSettings(self: *Self) !void {
-    const a = self.config.arena.allocator();
-    self.config.data.oauth_client_id = try a.dupe(u8, self.client_input.items);
-    self.config.data.release_repo = try a.dupe(u8, self.release_input.items);
-    try self.config.save(self.io);
 }
 fn saveExtensions(self: *Self) !void {
     const a = self.config.arena.allocator();
@@ -3559,6 +3593,16 @@ fn buttonKey(ctx: *ui.Frame, key: ui.Key, content: []const u8, enabled: bool, pr
 }
 fn nav(ctx: *ui.Frame, content: []const u8, active: bool, enabled: bool) !bool {
     return navKey(ctx, .str(content), content, active, enabled);
+}
+/// A page of the selected repository. The guide beside it shows which is open, so it takes no fill.
+fn pageNav(ctx: *ui.Frame, content: []const u8, active: bool, enabled: bool) !bool {
+    const key = ui.Key.str(content);
+    const b = Button{ .key = key, .disabled = !enabled, .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .padding = .xy(10, 5), .radius = .md, .font_size = .sm, .background = .transparent, .foreground = if (active) .text else .dimmed } };
+    const response = try b.openResponse(ctx);
+    try ctx.ui().setAccessibility(response.id, .{ .role = .button, .name = content, .state = .{ .disabled = !enabled } });
+    try truncatedLabel(ctx, key.indexed(10), content);
+    try b.close(ctx);
+    return response.clicked;
 }
 fn navKey(ctx: *ui.Frame, key: ui.Key, content: []const u8, active: bool, enabled: bool) !bool {
     const b = Button{ .key = key, .disabled = !enabled, .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .padding = .xy(10, 5), .radius = .md, .font_size = .sm, .background = if (active) themes.selection(ctx.ui().theme) else .transparent, .foreground = if (active) .text else .dimmed } };

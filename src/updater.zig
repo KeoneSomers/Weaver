@@ -35,11 +35,10 @@ pub fn platform() []const u8 {
         else => "linux-x86_64",
     };
 }
-pub fn check(io: std.Io, a: std.mem.Allocator, repo: []const u8, key: []const u8, current: []const u8) !Manifest {
-    if (!validRepo(repo) or key.len != 64) return error.UpdatesNotConfigured;
-    const url = try std.fmt.allocPrint(a, "https://github.com/{s}/releases/latest/download/weaver-update.json", .{repo});
-    defer a.free(url);
-    const r = try process.run(io, a, &.{ "curl", "--fail", "--silent", "--show-error", "--location", "--max-redirs", "5", "--max-time", "45", "--proto", "=https", "--proto-redir", "=https", url }, null, null);
+pub const manifest_url = "https://github.com/KeoneSomers/Weaver/releases/latest/download/weaver-update.json";
+pub fn check(io: std.Io, a: std.mem.Allocator, key: []const u8, current: []const u8) !Manifest {
+    if (key.len != 64) return error.UpdatesNotConfigured;
+    const r = try process.run(io, a, &.{ "curl", "--fail", "--silent", "--show-error", "--location", "--max-redirs", "5", "--max-time", "45", "--proto", "=https", "--proto-redir", "=https", manifest_url }, null, null);
     defer r.deinit(a);
     if (!r.ok) return error.UpdateCheckFailed;
     return verify(a, r.stdout, key, current);
@@ -70,24 +69,6 @@ pub fn download(io: std.Io, a: std.mem.Allocator, asset: Asset, directory: []con
     }
     try std.Io.Dir.cwd().rename(temporary, std.Io.Dir.cwd(), path, io);
     return path;
-}
-pub fn validRepo(repo: []const u8) bool {
-    var parts = std.mem.splitScalar(u8, repo, '/');
-    while (parts.next()) |part| if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
-    var slash: usize = 0;
-    for (repo) |c| {
-        if (c == '/') {
-            slash += 1;
-            continue;
-        }
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.') return false;
-    }
-    return slash == 1 and repo.len > 2 and repo[0] != '/' and repo[repo.len - 1] != '/';
-}
-test "update repositories reject traversal and non HTTPS providers" {
-    try std.testing.expect(!validRepo("https://evil.test/a"));
-    try std.testing.expect(!validRepo("a/b/c"));
-    try std.testing.expect(validRepo("owner/weaver"));
 }
 test "signed updates reject tampering, wrong keys, downgrades and prereleases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

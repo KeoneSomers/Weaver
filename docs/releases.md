@@ -21,12 +21,12 @@ Push a semantic version tag such as `v0.1.0`. The workflow builds Windows x64, L
 
 Linux currently requires a Wayland session because KnotsUI has no X11 backend. Native pickers use `xdg-desktop-portal` with a FileChooser backend installed by the desktop environment. Git, Git LFS and curl are runtime prerequisites; Linux GitHub sign-in additionally needs `secret-tool` and an unlocked Secret Service keyring. Git and Git LFS are deliberately not downloaded or installed silently.
 
-The app checks a public GitHub release repository for `weaver-update.json`, verifies its Ed25519 signature using the build's pinned key, rejects older/equal versions and prereleases, downloads only HTTPS assets, and verifies SHA-256 before offering installation. Release artifacts must be public for the updater. Downloads never attach the GitHub repository-access token. Update installation is user initiated. On Windows, Inno Setup updates the same per-user install directory and app ID. On macOS the verified DMG opens for installation; Linux opens the verified AppImage. Fully automatic replacement/rollback on macOS and Linux remains a release-hardening task.
+The app checks the latest release of [KeoneSomers/Weaver](https://github.com/KeoneSomers/Weaver) for `weaver-update.json`, verifies its Ed25519 signature using the build's pinned key, rejects older/equal versions and prereleases, downloads only HTTPS assets, and verifies SHA-256 before offering installation. Release artifacts must be public for the updater. Downloads never attach the GitHub repository-access token. Update installation is user initiated. On Windows, Inno Setup updates the same per-user install directory and app ID. On macOS the verified DMG opens for installation; Linux opens the verified AppImage. Fully automatic replacement/rollback on macOS and Linux remains a release-hardening task.
 
 Build the stable Windows bootstrap separately:
 
 ```text
-zig build bootstrap -Dheadless=true -Doptimize=ReleaseSafe -Drelease-repo=OWNER/REPO -Dupdate-public-key=PUBLIC_HEX_KEY
+zig build bootstrap -Dheadless=true -Doptimize=ReleaseSafe -Dupdate-public-key=PUBLIC_HEX_KEY
 ```
 
 Sign `zig-out/bin/weaver-setup.exe` with your publisher's certificate and timestamp, then host that exact binary at a permanent download URL. Do not rebuild it for every release. It fetches and authenticates the newest manifest and Windows installer. Rebuild and re-sign it only if the bootstrap or trusted key needs to change. Ordinary installers retain the fixed Inno Setup AppId. The bootstrap is intentionally not automatically included in every release.

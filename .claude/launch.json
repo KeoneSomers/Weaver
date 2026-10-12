@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "weaver-website",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../weaver-website", "run", "dev", "--", "--port", "4321"],
+      "port": 4321
+    }
+  ]
+}

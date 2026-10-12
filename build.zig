@@ -10,7 +10,6 @@ pub fn build(b: *std.Build) void {
     const options = b.addOptions();
     options.addOption([]const u8, "version", b.option([]const u8, "version", "Release version") orelse "0.1.0");
     options.addOption([]const u8, "oauth_client_id", b.option([]const u8, "oauth-client-id", "Public GitHub OAuth client ID") orelse "");
-    options.addOption([]const u8, "release_repo", b.option([]const u8, "release-repo", "GitHub owner/repo") orelse "");
     options.addOption([]const u8, "update_public_key", b.option([]const u8, "update-public-key", "Ed25519 public key (hex)") orelse "");
     const picker_probe = b.addExecutable(.{ .name = "weaver-picker-probe", .root_module = b.createModule(.{ .root_source_file = b.path("src/picker_probe.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
     picker_probe.root_module.addImport("nfd", dialogs);

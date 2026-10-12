@@ -38,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
         if (args.len > 3) try app.config.add(init.io, args[3]);
         if (args.len > 4) app.page = std.meta.stringToEnum(@FieldType(App, "page"), args[4]) orelse return error.UnknownPage;
         if (args.len > 5 and std.mem.eql(u8, args[5], "split")) app.split_diff = true;
+        if (args.len > 5 and std.mem.eql(u8, args[5], "add")) app.add_open = true;
         if (args.len > 5 and app.page == .settings) app.settings_section = std.meta.stringToEnum(@FieldType(App, "settings_section"), args[5]) orelse return error.UnknownSection;
     } else if (args.len > 1) try app.config.add(init.io, args[1]);
     try app.start();
