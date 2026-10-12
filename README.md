@@ -28,6 +28,8 @@ The downloads are not code-signed yet, so your system will warn you the first ti
 
 Weaver uses the Git you already have installed, so install [Git](https://git-scm.com/downloads) first (and Git LFS for repositories that use it). Linux also needs a Wayland session, a Vulkan 1.3 driver and `xdg-desktop-portal`; the build is made on Ubuntu 24.04, so older distributions may need to build from source. `SHA256SUMS.txt` in the release lists the checksums.
 
+The release also carries `Weaver-windows-x86_64.msix`. That is the unsigned package submitted to the Microsoft Store, which signs it; Windows will not install it directly, so use the zip.
+
 ## Features
 
 **Repositories**
@@ -169,6 +171,7 @@ More documentation:
 - [Extension API](docs/extensions.md)
 - [Repository performance](docs/performance.md)
 - [Releases, signing and updates](docs/releases.md)
+- [Microsoft Store packaging and submission](docs/microsoft-store.md)
 - [Application icon](docs/icons.md)
 
 ## Current limitations

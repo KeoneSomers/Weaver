@@ -64,6 +64,23 @@ jobs:
           Copy-Item -LiteralPath zig-out/bin/weaver.exe -Destination $bundle
           Copy-Item -LiteralPath zig-out/licenses -Destination $bundle -Recurse
           Compress-Archive -LiteralPath $bundle -DestinationPath "$bundle.zip"
+      # Unsigned on purpose: the Microsoft Store signs the package after certification.
+      # The identity is public and must match Partner Center > Product identity exactly.
+      - name: Package Windows for the Microsoft Store
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSSTORE_IDENTITY_NAME: Keone.Weaver-GitDesktopClient
+          MSSTORE_PUBLISHER: CN=02F98B6D-DB2E-4CA8-AC9A-1D0614AA298E
+          MSSTORE_PUBLISHER_DISPLAY_NAME: Keone
+        run: >
+          ./scripts/package-windows-msix.ps1
+          -Version $env:BASE_VERSION
+          -Build $env:GITHUB_RUN_NUMBER
+          -IdentityName $env:MSSTORE_IDENTITY_NAME
+          -Publisher $env:MSSTORE_PUBLISHER
+          -PublisherDisplayName $env:MSSTORE_PUBLISHER_DISPLAY_NAME
+          -Output "dist/$env:PACKAGE.msix"
       - name: Package Linux
         if: runner.os == 'Linux'
         run: |
@@ -93,6 +110,7 @@ jobs:
           name: ${{ matrix.platform }}
           path: |
             dist/Weaver-*.zip
+            dist/Weaver-*.msix
             dist/Weaver-*.tar.gz
             dist/Weaver-*.dmg
           if-no-files-found: error

@@ -38,6 +38,29 @@ for size in (16, 22, 24, 32, 48, 64, 96, 128, 192, 256, 512, 1024):
     directory.mkdir(parents=True, exist_ok=True)
     source.resize((size, size), Image.Resampling.LANCZOS).save(directory / "weaver.png")
 
+# Microsoft Store (MSIX) logos. Tiles centre the artwork on a transparent canvas;
+# the manifest names the unqualified file and resources.pri picks a variant.
+msix = root / "packaging/windows/msix/Assets"
+msix.mkdir(parents=True, exist_ok=True)
+for stale in msix.glob("*.png"):
+    stale.unlink()
+def tile(width, height, fill):
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    side = max(1, round(min(width, height) * fill))
+    canvas.paste(source.resize((side, side), Image.Resampling.LANCZOS), ((width - side) // 2, (height - side) // 2))
+    return canvas
+msix_logos = {
+    "StoreLogo": (50, 50, 1.0), "Square44x44Logo": (44, 44, 1.0), "Square71x71Logo": (71, 71, 0.8),
+    "Square150x150Logo": (150, 150, 0.66), "Wide310x150Logo": (310, 150, 0.66), "Square310x310Logo": (310, 310, 0.5),
+}
+for name, (width, height, fill) in msix_logos.items():
+    for scale in (100, 125, 150, 200, 400):
+        tile(round(width * scale / 100), round(height * scale / 100), fill).save(msix / f"{name}.scale-{scale}.png")
+# Exact-size icons for the taskbar, Start list and Alt+Tab; "unplated" stops Windows drawing a backplate.
+for size in (16, 24, 32, 48, 256):
+    for suffix in ("", "_altform-unplated", "_altform-lightunplated"):
+        tile(size, size, 1.0).save(msix / f"Square44x44Logo.targetsize-{size}{suffix}.png")
+
 # KnotsUI accepts raw pixels. Embed a small version without a runtime PNG decoder.
 (root / "assets/weaver.rgba").write_bytes(source.resize((64, 64), Image.Resampling.LANCZOS).tobytes())
 
@@ -56,4 +79,4 @@ for index in range(count):
     group += entry[:12] + struct.pack("<H", index + 1)
 result += resource(14, 1, group)
 (root / "assets/weaver.res").write_bytes(result)
-print("Exported Weaver PNG, ICO, ICNS, Windows resources, hicolor sizes and UI pixels")
+print("Exported Weaver PNG, ICO, ICNS, Windows resources, Store logos, hicolor sizes and UI pixels")

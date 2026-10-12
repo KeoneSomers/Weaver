@@ -13,9 +13,16 @@ extern "user32" fn GetDpiForWindow(*anyopaque) callconv(.winapi) u32;
 extern "user32" fn GetSystemMetricsForDpi(c_int, u32) callconv(.winapi) c_int;
 extern "user32" fn DestroyIcon(*anyopaque) callconv(.winapi) c_int;
 
+extern "kernel32" fn GetCurrentPackageFullName(*u32, ?[*]u16) callconv(.winapi) i32;
+
 /// Must precede creating the window; matches the installed Windows shortcut.
 pub fn prepare() !void {
     if (builtin.os.tag == .windows) {
+        // A Microsoft Store (MSIX) install already has the identity of its package;
+        // overriding it would detach the window from the Start and taskbar entry.
+        var length: u32 = 0;
+        const appmodel_error_no_package = 15700;
+        if (GetCurrentPackageFullName(&length, null) != appmodel_error_no_package) return;
         if (SetCurrentProcessExplicitAppUserModelID(std.unicode.utf8ToUtf16LeStringLiteral("app.weaver.desktop")) < 0)
             return error.DesktopIdentityUnavailable;
     }
