@@ -13,22 +13,24 @@ Weaver is a fast, native Git desktop app for Windows, macOS and Linux. It is wri
 
 ## Download
 
-These links always point at the newest build; the [latest release](https://github.com/KeoneSomers/Weaver/releases/latest) is rebuilt automatically for every change on `main`.
+**Windows users: get Weaver from the [Microsoft Store](https://apps.microsoft.com/detail/9NDRNSW9M234).** It is the recommended way to install on Windows: the Store build is signed, so there is no SmartScreen warning, and the Store keeps it up to date for you.
+
+The links below always point at the newest build; the [latest release](https://github.com/KeoneSomers/Weaver/releases/latest) is rebuilt automatically for every change on `main`.
 
 | Platform | Download | How to run |
 | --- | --- | --- |
-| Windows (x64) | [`Weaver-windows-x86_64.zip`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-windows-x86_64.zip) | Extract the folder and run `weaver.exe`. |
+| Windows (x64) | [Microsoft Store](https://apps.microsoft.com/detail/9NDRNSW9M234) (recommended), or [`Weaver-windows-x86_64.zip`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-windows-x86_64.zip) | Install from the Store, or extract the zip and run `weaver.exe`. |
 | macOS (Apple Silicon) | [`Weaver-macos-aarch64.dmg`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-macos-aarch64.dmg) | Open the disk image and drag Weaver to Applications. |
 | Linux (x64, Wayland) | [`Weaver-linux-x86_64.tar.gz`](https://github.com/KeoneSomers/Weaver/releases/latest/download/Weaver-linux-x86_64.tar.gz) | Extract and run `bin/weaver`. |
 
-The downloads are not code-signed yet, so your system will warn you the first time:
+The direct downloads are not code-signed yet, so your system will warn you the first time:
 
-- **Windows:** on the SmartScreen prompt choose **More info**, then **Run anyway**.
+- **Windows (zip):** on the SmartScreen prompt choose **More info**, then **Run anyway**.
 - **macOS:** after the first blocked launch, open **System Settings → Privacy & Security** and choose **Open Anyway**, or run `xattr -dr com.apple.quarantine /Applications/Weaver.app`.
 
 Weaver uses the Git you already have installed, so install [Git](https://git-scm.com/downloads) first (and Git LFS for repositories that use it). Linux also needs a Wayland session, a Vulkan 1.3 driver and `xdg-desktop-portal`; the build is made on Ubuntu 24.04, so older distributions may need to build from source. `SHA256SUMS.txt` in the release lists the checksums.
 
-The release also carries `Weaver-windows-x86_64.msix`. That is the unsigned package submitted to the Microsoft Store, which signs it; Windows will not install it directly, so use the zip.
+The release also carries `Weaver-windows-x86_64.msix`. That is the unsigned package submitted to the Microsoft Store, which signs it; Windows will not install it directly, so use the Store or the zip.
 
 ## Features
 
@@ -176,7 +178,7 @@ More documentation:
 
 ## Current limitations
 
-- Downloads are not code-signed, and there is no installer or automatic update yet.
+- The direct downloads are not code-signed and do not update automatically. On Windows, the Microsoft Store build is signed and kept up to date by the Store.
 - Linux needs Wayland; there is no X11 backend.
 - macOS needs Apple Silicon; KnotsUI's GPU and scripting dependencies have no Intel Mac builds.
 - No complex text shaping or IME composition yet.
