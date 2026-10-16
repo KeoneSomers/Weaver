@@ -5,6 +5,8 @@ const credentials = @import("credentials.zig");
 extern "c" fn getchar() c_int;
 extern "c" fn putchar(c_int) c_int;
 extern "c" fn fflush(?*anyopaque) c_int;
+extern "kernel32" fn AttachConsole(process_id: u32) callconv(.winapi) i32;
+const attach_parent_process: u32 = 0xFFFFFFFF;
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--credential-helper")) {
@@ -27,6 +29,9 @@ pub fn main(init: std.process.Init) !void {
         _ = fflush(null);
         return;
     }
+    // The Windows build uses the GUI subsystem, so it gets no console of its
+    // own. When started from a terminal, borrow that terminal for panics and logs.
+    if (@import("builtin").os.tag == .windows) _ = AttachConsole(attach_parent_process);
     try git.init();
     defer git.shutdown();
     var app = try App.init(init.io, init.gpa, init.environ_map);

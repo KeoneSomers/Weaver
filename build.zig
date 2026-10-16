@@ -86,6 +86,9 @@ pub fn build(b: *std.Build) void {
     b.installFile("THIRD_PARTY_NOTICES.md", "licenses/THIRD_PARTY_NOTICES.md");
     if (target.result.os.tag == .windows) {
         exe.root_module.addObjectFile(b.path("assets/weaver.res"));
+        // A GUI subsystem binary opens no console window; main.zig reattaches
+        // to the launching terminal so diagnostics still reach it.
+        exe.subsystem = .windows;
     }
     const run = b.addRunArtifact(exe);
     if (target.result.os.tag == .linux) {
