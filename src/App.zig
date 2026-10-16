@@ -1539,7 +1539,9 @@ fn sidebar(self: *Self, ctx: *ui.Frame) !void {
     const panel = Rect{ .key = .str("sidebar"), .style = &.{ .width = .fixed(try self.panelWidth(ctx, .sidebar)), .height = .grow(), .direction = .column, .padding = .all(10), .gap = 2, .background = .elevated, .radius = .{ .fixed = 14 } } };
     _ = try panel.open(ctx);
     try sectionLabel(ctx, "repos-label", "Repositories");
-    const repos = Rect{ .key = .str("repositories"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .overflow = .scroll_y } };
+    // Keep row backgrounds and controls clear of the overlay scrollbar, with a
+    // stable gutter so the rows do not resize when the list starts scrolling.
+    const repos = Rect{ .key = .str("repositories"), .style = &.{ .width = .grow(), .height = .grow(), .direction = .column, .overflow = .scroll_y, .padding = .init(0, ctx.ui().theme.scrollbar_thickness + 6, 0, 0) } };
     _ = try repos.open(ctx);
     // The scrolled column: its box places the rows a drag lands between.
     const list = Rect{ .key = .str("repository-rows"), .style = comptime &.{ .width = .grow(), .direction = .column, .gap = row_gap } };
