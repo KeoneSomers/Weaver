@@ -74,6 +74,28 @@ pub fn load(a: std.mem.Allocator, path: []const u8) !Snapshot {
 pub fn metadata(a: std.mem.Allocator, path: []const u8) !Snapshot {
     return loadMode(a, path, false);
 }
+/// Outgoing commits without loading history, file lists or patches.
+pub fn hasOutgoing(a: std.mem.Allocator, path: []const u8) !bool {
+    const repo = try open(a, path);
+    defer c.git_repository_free(repo);
+    var head: ?*c.git_reference = null;
+    const status = c.git_repository_head(&head, repo);
+    if (status == c.GIT_EUNBORNBRANCH or status == c.GIT_ENOTFOUND) return false;
+    try check(status);
+    defer c.git_reference_free(head);
+    if (c.git_reference_is_branch(head) == 0) return false;
+    const oid = c.git_reference_target(head) orelse return false;
+    var upstream: ?*c.git_reference = null;
+    if (c.git_branch_upstream(&upstream, head) == 0) {
+        defer c.git_reference_free(upstream);
+        const upstream_oid = c.git_reference_target(upstream) orelse return false;
+        var ahead: usize = 0;
+        var behind: usize = 0;
+        try check(c.git_graph_ahead_behind(&ahead, &behind, repo, oid, upstream_oid));
+        return ahead > 0;
+    }
+    return try unpublished(repo) > 0;
+}
 fn loadMode(a: std.mem.Allocator, path: []const u8, changes: bool) !Snapshot {
     var snap = Snapshot{ .arena = .init(a) };
     errdefer snap.deinit();

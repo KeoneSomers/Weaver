@@ -19,10 +19,33 @@ The values are public (every package contains them) and case-sensitive. Run loca
 
 Every push to `main` attaches `Weaver-windows-x86_64.msix` to the rolling GitHub release. Download it, start a submission in Partner Center and upload it on the **Packages** page. The package is unsigned on purpose: the Store signs it after certification, and Windows will not install it directly.
 
-Partner Center asks why the package needs its two restricted capabilities:
+Partner Center asks why the package needs its restricted capability:
 
 - `runFullTrust`: Weaver is a native Win32 desktop application that starts the user's installed Git.
-- `unvirtualizedResources`: Git, Git hooks and Git LFS filters run as child processes and must read and write the user's real `AppData` (tool caches and configuration) rather than a private copy. Settings are kept in `%APPDATA%\Weaver`.
+
+The package does **not** request `unvirtualizedResources`. AppData and HKCU write virtualization retain Windows defaults on both Windows 10 and Windows 11. There is no `desktop6:FileSystemWriteVirtualization` or `desktop6:RegistryWriteVirtualization` opt-out, and no Windows 11 `virtualization:ExcludedDirectories` or registry exclusions. The packaging script rejects any reintroduction of these declarations for review before submission.
+
+### Resolving the 10.6.3 capability rejection
+
+Upload a newly built MSIX with the denied capability removed; do not re-upload the rejected package. Use a build number greater than the last uploaded package. Replace the previous capability justification with the following submission note:
+
+> This submission removes the denied unvirtualizedResources capability and the FileSystemWriteVirtualization=disabled declaration. Weaver retains Windows default AppData and HKCU write virtualization on Windows 10 and Windows 11, with no Flexible Virtualization exclusions. The remaining runFullTrust capability is required because Weaver is a native Win32 Git desktop client that invokes the user's installed Git. We are no longer requesting an exception for unvirtualized resources.
+
+Weaver's own settings use the logical path `%APPDATA%\Weaver\settings.json` (with a temporary file alongside it during saves), subject to Windows virtualization. Do not promise that Store and portable installations share settings or that virtualized settings survive uninstall. Windows Credential Manager is accessed through `CredRead`, `CredWrite` and `CredDelete`; Weaver does not directly write its backing files or require an HKCU opt-out.
+
+The previous justification assumed all Git tooling needed shared AppData. That is not established by the implementation. Git repository writes are selected by repository path; LFS setup uses `git lfs install --local`. Hooks, helpers and filters follow the user's Git configuration, so their potential paths cannot be honestly enumerated as one fixed AppData allowlist. Weaver does not sandbox those programs or enforce a filesystem write allowlist. Argument arrays, literal pathspecs, argument validation and operation timeouts constrain command invocation, but do not restrict the files a configured helper can write. Git itself may invoke shells for configured hooks/helpers; Weaver's own helper shell snippet quotes its executable path and contains no repository-supplied command text.
+
+Before resubmitting, test the **packaged** app on Windows 10 and Windows 11 with a disposable repository outside AppData:
+
+- Save settings, restart the packaged app and verify they reload. Check any existing settings from a previous installation separately.
+- Stage, commit, fetch and push; verify the configured commit hook runs. Check SSH/signing if supported by the test configuration.
+- Sign in with Git Credential Manager, restart, then fetch/push using the stored credential; also check Weaver's own sign-in/sign-out.
+- Enable LFS locally, then track, commit, upload and download a disposable LFS file; check the resulting file contents.
+- Exercise a representative configured helper/hook that creates new AppData files, and check whether it needs to share those files with an external process.
+
+Source inspection and successful MSIX packing do not prove these runtime checks. If a required integration fails specifically because of redirection, capture the exact process and required AppData directory before considering an exception. Windows 11 can use named directory exclusions, but those still require the restricted capability; Windows 10 has no equivalent fine-grained fallback. Do not disable all AppData virtualization merely to accommodate arbitrary hooks. Any future reconsideration must state the actual account type and a valid publisher support contact, and distinguish intended scope from enforced restrictions.
+
+Microsoft references: [Flexible virtualization](https://learn.microsoft.com/en-us/windows/msix/desktop/flexible-virtualization), [Packaged desktop app behavior](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-behind-the-scenes).
 
 State in the listing that Git must already be installed. Do not pass `-Dupdate-public-key` to Store builds: it enables Weaver's own updater, and Store apps must update through the Store.
 

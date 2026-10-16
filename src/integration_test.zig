@@ -116,6 +116,59 @@ fn command(path: []const u8, args: []const []const u8) !void {
     }
 }
 
+test "sidebar summaries prioritize changes and follow outgoing commits, ignores and multiple repositories" {
+    const sidebar = @import("workspace_status.zig");
+    try git.init();
+    defer git.shutdown();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = buffer[0..try temp.dir.realPath(io, &buffer)];
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const local = try std.fs.path.join(alloc, &.{ root, "local" });
+    const other = try std.fs.path.join(alloc, &.{ root, "other" });
+    const remote = try std.fs.path.join(alloc, &.{ root, "remote.git" });
+    try command(root, &.{ "init", "--initial-branch=main", local });
+    try command(root, &.{ "init", "--initial-branch=main", other });
+    try command(root, &.{ "init", "--bare", "--initial-branch=main", remote });
+    try std.testing.expectEqual(sidebar.Status.clean, try sidebar.read(io, a, local));
+    try temp.dir.writeFile(io, .{ .sub_path = "local/.gitignore", .data = "ignored.txt\n" });
+    try temp.dir.writeFile(io, .{ .sub_path = "local/file.txt", .data = "initial\n" });
+    try std.testing.expectEqual(sidebar.Status.dirty, try sidebar.read(io, a, local));
+    try command(local, &.{ "add", "--all" });
+    try std.testing.expectEqual(sidebar.Status.dirty, try sidebar.read(io, a, local));
+    try command(local, &.{ "-c", "user.name=Weaver Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "-m", "Initial" });
+    try std.testing.expectEqual(sidebar.Status.outgoing, try sidebar.read(io, a, local));
+    try temp.dir.writeFile(io, .{ .sub_path = "local/ignored.txt", .data = "ignored\n" });
+    try std.testing.expectEqual(sidebar.Status.outgoing, try sidebar.read(io, a, local));
+    try temp.dir.writeFile(io, .{ .sub_path = "local/file.txt", .data = "edited\n" });
+    try std.testing.expectEqual(sidebar.Status.dirty, try sidebar.read(io, a, local));
+    try temp.dir.writeFile(io, .{ .sub_path = "local/file.txt", .data = "initial\n" });
+    try command(local, &.{ "remote", "add", "origin", remote });
+    try command(local, &.{ "push", "--set-upstream", "origin", "main" });
+    try std.testing.expectEqual(sidebar.Status.clean, try sidebar.read(io, a, local));
+    try command(local, &.{ "switch", "--detach" });
+    try std.testing.expectEqual(sidebar.Status.clean, try sidebar.read(io, a, local));
+    try command(local, &.{ "switch", "main" });
+    try temp.dir.writeFile(io, .{ .sub_path = "other/new.txt", .data = "new\n" });
+    var monitor: sidebar.Monitor = .{};
+    defer monitor.deinit(a);
+    const initial = try monitor.update(io, a, alloc, &.{ local, other }, true);
+    try std.testing.expectEqual(@as(usize, 2), initial.len);
+    try std.testing.expectEqual(sidebar.Status.clean, initial[0].status.?);
+    try std.testing.expectEqual(sidebar.Status.dirty, initial[1].status.?);
+    try temp.dir.deleteFile(io, "other/new.txt");
+    // Let the notification arrive and pass the quiet debounce interval.
+    _ = try monitor.update(io, a, alloc, &.{ other, local }, true);
+    const changed = try monitor.update(io, a, alloc, &.{ other, local }, true);
+    if (@import("builtin").os.tag == .windows) try std.testing.expectEqual(sidebar.Status.clean, changed[1].status.?);
+    const removed = try monitor.update(io, a, alloc, &.{other}, true);
+    try std.testing.expectEqual(@as(usize, 1), removed.len);
+    try std.testing.expect(@import("config.zig").equalPath(other, removed[0].path));
+}
+
 test "background fetch updates ahead and behind without touching working files" {
     try git.init();
     defer git.shutdown();
@@ -135,6 +188,7 @@ test "background fetch updates ahead and behind without touching working files" 
     try command(publisher, &.{ "push", "--set-upstream", "origin", "main" });
     try command(root, &.{ "clone", "--", remote, local });
     try command(local, &.{ "-c", "user.name=Weaver Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "--allow-empty", "-m", "Outgoing" });
+    try std.testing.expectEqual(@import("workspace_status.zig").Status.outgoing, try @import("workspace_status.zig").read(io, a, local));
     try command(publisher, &.{ "-c", "user.name=Weaver Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git/hooks", "commit", "--allow-empty", "-m", "Incoming" });
     try command(publisher, &.{"push"});
     try temp.dir.writeFile(io, .{ .sub_path = "local/notes.txt", .data = "Keep this uncommitted file.\n" });

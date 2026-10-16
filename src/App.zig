@@ -27,6 +27,7 @@ const guidance = @import("guidance.zig");
 const ignore = @import("ignore.zig");
 const editor = @import("editor.zig");
 const sidebar_drag = @import("sidebar_drag.zig");
+const workspace_status = @import("workspace_status.zig");
 const options = @import("options");
 const Self = @This();
 const Rect = ui.component.Rect;
@@ -118,8 +119,11 @@ const Resize = struct {
 };
 /// What the name dialog edits or creates. A new group can take a workspace entry with it.
 const NameTarget = union(enum) { repository: usize, group: u32, new_group: ?usize, new_branch, rename_branch };
-const JobKind = enum { git, open_local, counts, preview, revision, auth_begin, auth_poll, sign_out, update_check, update_download, extension, github_repos };
+const JobKind = enum { git, open_local, counts, preview, revision, auth_begin, auth_poll, sign_out, update_check, update_download, extension, github_repos, sidebar_status };
 const Job = struct {
+    workspace_monitor: ?*workspace_status.Monitor = null,
+    workspace_paths: []const []const u8 = &.{},
+    automatic: bool = true,
     environment: ?*const std.process.Environ.Map = null,
     quiet: bool = false,
     generation: u64 = 0,
@@ -143,6 +147,7 @@ const Job = struct {
     }
 };
 const Result = struct {
+    workspace_summaries: []workspace_status.Summary = &.{},
     operation: model.Operation = .refresh,
     repository_path: []const u8 = "",
     fetched_at: ?i64 = null,
@@ -213,6 +218,9 @@ counts_quiet: bool = false,
 preview_quiet: bool = false,
 refresh_pending: bool = false,
 watcher: repository_watch.Watcher = .{},
+workspace_monitor: workspace_status.Monitor = .{},
+workspace_summaries: []workspace_status.Summary = &.{},
+workspace_arena: ?std.heap.ArenaAllocator = null,
 watch_epoch: std.atomic.Value(u64) = .init(0),
 preview_pending: bool = false,
 preview_wait_ns: u64 = 0,
@@ -361,6 +369,8 @@ pub fn deinit(self: *Self) void {
     self.a.free(self.git_install_report);
     self.app_icon.deinit();
     self.watcher.deinit(self.a);
+    self.workspace_monitor.deinit(self.a);
+    if (self.workspace_arena) |*arena| arena.deinit();
     if (self.snapshot) |*s| s.deinit();
     if (self.revision) |*s| s.deinit();
     if (self.preview) |*s| s.deinit();
@@ -381,6 +391,7 @@ pub fn deinit(self: *Self) void {
 }
 pub fn start(self: *Self) !void {
     try self.checkGitRuntime(false);
+    try self.scheduleWorkspaceStatus();
     if (self.path()) |repo_path| {
         if (providers.byId(self.config.data.repositories[self.config.data.selected].provider)) |provider| {
             self.provider = provider;
@@ -407,6 +418,18 @@ fn untrack(self: *Self, delivery: *Delivery) void {
 }
 fn scheduleRefresh(self: *Self) !void {
     try self.app.dispatch(self.app.main_viewport.id, refreshWait, .{ self.io, &self.watcher, &self.watch_epoch, self.watch_epoch.load(.acquire) }, refreshTick);
+}
+fn scheduleWorkspaceStatus(self: *Self) !void {
+    const job = try self.a.create(Job);
+    job.* = .{ .arena = .init(self.a), .kind = .sidebar_status, .path = "", .request = .{ .operation = .refresh }, .provider = &providers.git, .quiet = true, .workspace_monitor = &self.workspace_monitor, .automatic = self.config.data.auto_refresh };
+    errdefer job.deinit(self.a);
+    const arena = job.arena.allocator();
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (self.config.data.repositories) |repository| if (std.mem.eql(u8, repository.provider, providers.git.id)) {
+        try paths.append(arena, try arena.dupe(u8, repository.path));
+    };
+    job.workspace_paths = try paths.toOwnedSlice(arena);
+    try self.dispatchTracked(.job, work, done, job);
 }
 fn refreshWait(io: std.Io, watcher: *repository_watch.Watcher, epoch: *const std.atomic.Value(u64), expected: u64) repository_watch.Signal {
     return watcher.wait(io, epoch, expected);
@@ -725,6 +748,7 @@ fn perform(io: std.Io, a: std.mem.Allocator, job: *Job, result: *Result) !void {
     const arena = result.arena.allocator();
     result.repository_path = try arena.dupe(u8, job.path);
     switch (job.kind) {
+        .sidebar_status => result.workspace_summaries = try job.workspace_monitor.?.update(io, a, arena, job.workspace_paths, job.automatic),
         .open_local => {
             const detected = try @import("git.zig").discover(arena, job.path) orelse {
                 result.setup_path = try arena.dupe(u8, job.path);
@@ -820,6 +844,30 @@ fn done(view: *knots.View, frame_ctx: *ui.Frame, value: Result) !void {
     const self = of(view);
     var result = value;
     defer result.deinit();
+    if (result.kind == .sidebar_status) {
+        if (!result.failed) {
+            var changed = self.workspace_summaries.len != result.workspace_summaries.len;
+            for (result.workspace_summaries) |*summary| {
+                var found = false;
+                for (self.workspace_summaries) |previous| if (config_mod.equalPath(summary.path, previous.path)) {
+                    found = true;
+                    // Keep a newer foreground refresh until the monitor actually
+                    // reads this repository again, including with auto refresh off.
+                    if (summary.revision == previous.revision) summary.status = previous.status;
+                    changed = changed or summary.status != previous.status;
+                    break;
+                };
+                changed = changed or !found;
+            }
+            if (self.workspace_arena) |*arena| arena.deinit();
+            self.workspace_arena = result.arena;
+            self.workspace_summaries = result.workspace_summaries;
+            result.arena = .init(self.a);
+            if (changed) frame_ctx.requestRedraw();
+        }
+        try self.scheduleWorkspaceStatus();
+        return;
+    }
     if (result.kind == .git and result.quiet and result.operation == .fetch) self.fetch_busy = false;
     if (result.fetched_at) |timestamp| {
         for (self.config.data.repositories) |*repository| if (config_mod.equalPath(repository.path, result.repository_path)) {
@@ -904,6 +952,9 @@ fn done(view: *knots.View, frame_ctx: *ui.Frame, value: Result) !void {
     if (result.kind == .git and result.operation == .add_remote) self.publish_after_connect = false;
     const a = self.config.arena.allocator();
     if (result.snapshot) |snapshot| {
+        for (self.workspace_summaries) |*summary| if (config_mod.equalPath(summary.path, snapshot.path)) {
+            summary.status = workspace_status.fromSnapshot(snapshot);
+        };
         if (!config_mod.equalPath(self.watcher.path, snapshot.path)) _ = self.watch_epoch.fetchAdd(1, .release);
         if (background) if (self.snapshot) |previous| {
             var comparable = previous;
@@ -1832,6 +1883,7 @@ fn dragGhost(self: *Self, ctx: *ui.Frame) !void {
                 try ctx.e(Text{ .key = key.indexed(1), .content = glyph.text(), .selectable = false, .style = &.{ .font = "lucide", .font_size = .{ .px = 15 }, .foreground = if (projectTint(ctx, repository.icon_color)) |color| .{ .color = color } else null } });
             try icon.close(ctx);
             try ctx.e(Text{ .key = key.indexed(2), .content = try diff.safeText(ctx.arena(), repository.label()), .selectable = false, .style = &.{ .width = .grow(), .wrap = false, .overflow = .hidden, .padding = .xy(6, 0) } });
+            try self.repositoryStatusDot(ctx, key.indexed(4), repository.path);
         },
     }
     try line.close(ctx);
@@ -1894,13 +1946,28 @@ fn repositoryRow(self: *Self, ctx: *ui.Frame, i: usize, repository: config_mod.R
     const key = ui.Key.str("repository-nav").indexed(i);
     const b = Button{ .key = key, .disabled = !self.canNavigate(), .style = &.{ .width = .grow(), .height = .fixed(nav_height), .justify = .start, .padding = .xy(6, 5), .radius = .md, .font_size = .sm, .background = .transparent, .foreground = if (active) .text else .dimmed, .hover = &.{ .state_layer = 0 }, .active = &.{ .state_layer = 0 } } };
     const response = try b.openResponse(ctx);
-    try ctx.ui().setAccessibility(response.id, .{ .role = .button, .name = name, .state = .{ .disabled = !self.canNavigate() } });
+    const status = self.repositoryStatus(repository.path);
+    try ctx.ui().setAccessibility(response.id, .{ .role = .button, .name = if (status) |s| try std.fmt.allocPrint(ctx.arena(), "{s}, {s}", .{ name, s.description() }) else name, .state = .{ .disabled = !self.canNavigate() } });
     try truncatedLabel(ctx, key.indexed(10), name);
+    try self.repositoryStatusDot(ctx, key.indexed(11), repository.path);
     try b.close(ctx);
     try line.close(ctx);
     try shell.close(ctx);
     // A click on the icon opens its picker and nothing else.
     return response.clicked or (self.canNavigate() and !icon_response.hovered and !icon_response.clicked and ctx.ui().leftClicked(row_key.hash(), .within));
+}
+fn repositoryStatus(self: *Self, path_value: []const u8) ?workspace_status.Status {
+    for (self.workspace_summaries) |summary| if (config_mod.equalPath(summary.path, path_value)) return summary.status;
+    if (self.snapshot) |snapshot| if (config_mod.equalPath(snapshot.path, path_value)) return workspace_status.fromSnapshot(snapshot);
+    return null;
+}
+fn repositoryStatusDot(self: *Self, ctx: *ui.Frame, key: ui.Key, path_value: []const u8) !void {
+    const status = self.repositoryStatus(path_value) orelse return;
+    if (status == .clean) return;
+    const tooltip = ui.component.Tooltip{ .key = key, .content = status.description(), .placement = .bottom, .style = &.{ .width = .fixed(18), .height = .fixed(22), .justify = .center, .@"align" = .center } };
+    _ = try tooltip.open(ctx);
+    try ctx.e(Rect{ .key = key.indexed(1), .style = &.{ .width = .fixed(6), .height = .fixed(6), .radius = .{ .fixed = 3 }, .background = .{ .color = projectTint(ctx, if (status == .dirty) "#E8C65C" else "#B4A0FF").? } } });
+    try tooltip.close(ctx);
 }
 /// A group heading; clicking it shows or hides the group's entries.
 fn groupRow(ctx: *ui.Frame, group: config_mod.Group) !bool {
@@ -2333,10 +2400,21 @@ fn worktree(self: *Self, ctx: *ui.Frame) !void {
         try ctx.e(Text{ .key = .str("changes-count"), .content = if (live != null) try std.fmt.allocPrint(ctx.arena(), "{d}", .{shown_files.len}) else "…", .style = &.{ .background = .muted, .padding = .xy(8, 3), .radius = .sm, .foreground = .dimmed, .font_size = .xs } });
         try title.close(ctx);
         try ctx.e(TextInput{ .key = .str("file-filter"), .buf = &self.filter_input, .placeholder = "Filter files…", .style = &.{ .width = .grow(), .background = .muted, .border_color = .transparent, .radius = .md, .padding = .xy(12, 9) } });
-        const actions = try row(ctx, "stage-actions");
-        if (try self.operationButton(ctx, "stage-all", "Stage all", self.available(), false, .stage_all)) try self.request(ctx, .stage_all, "", "");
-        if (try self.operationButton(ctx, "unstage-all", "Unstage all", self.available(), false, .unstage_all)) try self.request(ctx, .unstage_all, "", "");
-        try actions.close(ctx);
+        var has_staged = false;
+        var has_unstaged = false;
+        for (shown_files) |file| {
+            if (file.staged) has_staged = true else has_unstaged = true;
+        }
+        if (has_staged or has_unstaged) {
+            const actions = try row(ctx, "stage-actions");
+            if (has_unstaged) {
+                if (try self.operationButton(ctx, "stage-all", "Stage all", self.available(), false, .stage_all)) try self.request(ctx, .stage_all, "", "");
+            }
+            if (has_staged) {
+                if (try self.operationButton(ctx, "unstage-all", "Unstage all", self.available(), false, .unstage_all)) try self.request(ctx, .unstage_all, "", "");
+            }
+            try actions.close(ctx);
+        }
         if (live != null) try self.files(ctx, shown_files) else {
             const pending = Rect{ .key = .str("changes-pending"), .style = comptime &.{ .width = .grow(), .height = .grow() } };
             _ = try pending.open(ctx);
@@ -2807,9 +2885,11 @@ fn gitHealthDialog(self: *Self, ctx: *ui.Frame) !void {
         try wrapped(ctx, "git-manager-description", health.description(), .dimmed);
         if (git_runtime.canApply(health)) {
             try wrapped(ctx, "git-apply-command", try std.mem.join(ctx.arena(), " ", try git_runtime.applyArguments(ctx.arena(), health)), .dimmed);
-            if (try button(ctx, "git-install-update", if (health.presence == .missing) "Install Git" else "Update Git", self.available() and !self.git_health_busy and !self.background_busy and !self.counts_busy and !self.preview_busy, true)) {
+            if (self.git_installing) {
+                try busyButton(ctx, .{ .key = .str("git-install-update"), .disabled = true, .style = &.{ .padding = .xy(12, 8), .gap = 6, .font_size = .xs, .radius = .md, .background = .accent, .foreground = .on_accent } }, if (health.presence == .missing) "Installing Git…" else "Updating Git…", ctx.ui().theme.on_primary);
+            } else if (try button(ctx, "git-install-update", if (health.presence == .missing) "Install Git" else "Update Git", self.available() and !self.git_health_busy and !self.background_busy and !self.counts_busy and !self.preview_busy, true)) {
                 try self.launchGitHealth(health.*, self.gitUpdateChecks());
-                self.message("Installing Git…", false);
+                self.message(if (health.presence == .missing) "Installing Git…" else "Updating Git…", false);
             }
         }
         if (!git_runtime.canApply(health) and (health.presence == .missing or health.update_available)) {
@@ -2820,7 +2900,7 @@ fn gitHealthDialog(self: *Self, ctx: *ui.Frame) !void {
             if (try button(ctx, "git-manage-installation", try std.fmt.allocPrint(ctx.arena(), "Manage Git with {s}…", .{git_runtime.managerName(health.manager)}), !self.git_installing, false))
                 try openPath(self.io, self.a, git_runtime.managerInstructions(health.manager, @import("builtin").os.tag));
         }
-        if (self.git_installing) try wrapped(ctx, "git-install-progress", "Running the Git installation command. Weaver waits for it to finish, then verifies the installed version. Complete any administrator prompt it opens.", .dimmed);
+        if (self.git_installing) try wrapped(ctx, "git-install-progress", "Please wait while Git is installed or updated and its version is verified. Complete any administrator prompt that opens.", .dimmed);
         if (self.git_install_report.len > 0) {
             try label(ctx, "git-last-command", "Last Git command result", .dimmed);
             const report = Rect{ .key = .str("git-install-output"), .style = &.{ .width = .grow(), .height = .{ .kind = .fit, .max = 180 }, .padding = .xy(12, 10), .radius = .md, .background = .muted, .overflow = .scroll_y } };

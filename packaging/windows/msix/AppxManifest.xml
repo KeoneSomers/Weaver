@@ -6,9 +6,8 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
-  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap3 desktop desktop6 rescap">
+  IgnorableNamespaces="uap uap3 desktop rescap">
   <Identity Name="{{IDENTITY_NAME}}" Publisher="{{PUBLISHER}}" Version="{{VERSION}}" ProcessorArchitecture="x64" />
   <Properties>
     <!-- Must match the name reserved in Partner Center. Start and the taskbar show the
@@ -17,10 +16,8 @@
     <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Description>A fast, native Git desktop app.</Description>
     <Logo>Assets\StoreLogo.png</Logo>
-    <!-- Git, its hooks and LFS filters run as child processes and must see the user's real
-         AppData (tool caches, configuration), not a private per-package copy. Settings also stay
-         in %APPDATA%\Weaver, shared with builds installed outside the Store. -->
-    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+    <!-- Keep default AppData and HKCU write virtualization on Windows 10 and 11.
+         Do not opt out for arbitrary user-configured Git hooks, helpers or filters. -->
   </Properties>
   <Resources>
     <Resource Language="en-us" />
@@ -30,7 +27,6 @@
   </Dependencies>
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
-    <rescap:Capability Name="unvirtualizedResources" />
   </Capabilities>
   <Applications>
     <Application Id="Weaver" Executable="weaver.exe" EntryPoint="Windows.FullTrustApplication">

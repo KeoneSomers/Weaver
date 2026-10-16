@@ -29,6 +29,14 @@ $minor = [int]$Matches[2]
 if ($major -gt 65535 -or $minor -gt 65535 -or $Build -lt 0 -or $Build -gt 65535) { throw 'Each part of an MSIX version must be between 0 and 65535' }
 $packageVersion = "$major.$minor.$Build.0"
 
+# Store policy 10.6.3: keep default virtualization. Adding even narrow exclusions
+# needs a fresh, evidence-backed capability review, not just a manifest edit.
+$manifest = [IO.File]::ReadAllText("$root/packaging/windows/msix/AppxManifest.xml")
+$manifestXml = [xml]$manifest
+if ($manifestXml.SelectNodes('//*[local-name()="Capability" and @Name="unvirtualizedResources"] | //*[local-name()="FileSystemWriteVirtualization" or local-name()="RegistryWriteVirtualization"]').Count -ne 0) {
+    throw 'Store packaging requires default AppData/HKCU virtualization and no unvirtualizedResources capability; see docs/microsoft-store.md'
+}
+
 $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
 $sdk = Get-ChildItem -Path $kits -Directory -Filter '10.*' -ErrorAction SilentlyContinue |
     Where-Object { (Test-Path "$($_.FullName)/x64/makeappx.exe") -and (Test-Path "$($_.FullName)/x64/makepri.exe") } |
@@ -45,7 +53,6 @@ Copy-Item -LiteralPath "$root/zig-out/bin/weaver.exe" -Destination $layout
 Copy-Item -LiteralPath "$root/zig-out/licenses" -Destination $layout -Recurse
 Copy-Item -LiteralPath "$root/packaging/windows/msix/Assets" -Destination $layout -Recurse
 
-$manifest = [IO.File]::ReadAllText("$root/packaging/windows/msix/AppxManifest.xml")
 $values = @{ IDENTITY_NAME = $IdentityName; PUBLISHER = $Publisher; PUBLISHER_DISPLAY_NAME = $PublisherDisplayName; VERSION = $packageVersion }
 foreach ($key in $values.Keys) { $manifest = $manifest.Replace("{{$key}}", [Security.SecurityElement]::Escape($values[$key])) }
 [IO.File]::WriteAllText("$layout/AppxManifest.xml", $manifest)

@@ -17,4 +17,5 @@ test {
     _ = @import("ignore.zig");
     _ = @import("icons.zig");
     _ = @import("sidebar_drag.zig");
+    _ = @import("workspace_status.zig");
 }
